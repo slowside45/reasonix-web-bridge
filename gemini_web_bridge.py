@@ -88,50 +88,63 @@ async def ask_gemini_web(prompt_text, image_path=None):
         return f"ERROR: No browser. Start {hint} with --remote-debugging-port={CDP_PORT}"
     import websockets
     try:
-        async with websockets.connect(ws_url, ping_interval=None) as ws:
+        async with websockets.connect(ws_url, ping_interval=None, max_size=None) as ws:
             # 通用 CDP 命令发送
             async def send_cdp(cid, method, params=None):
                 cmd = {"id": cid, "method": method}
                 if params: cmd["params"] = params
-                await ws.send(json.dumps(cmd))
+                # ensure_ascii=False: 中文直接以 UTF-8 传输，避免 \uXXXX 转义
+                # 在 Windows 的某些 CDP/websocket 路径上导致 GBK 混淆
+                await ws.send(json.dumps(cmd, ensure_ascii=False))
                 return json.loads(await ws.recv())
 
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js})
 
-            # ── 多模态：上传图片 ──
+            # ── 多模态：通过隐藏 input 注入文件 ──
             if image_path and os.path.isfile(image_path):
-                log("Uploading image:", image_path)
+                log("Uploading:", image_path)
                 abs_path = os.path.abspath(image_path)
-                # 1. 启用 DOM
-                await send_cdp(201, "DOM.enable")
-                # 2. 获取 document
-                doc = await send_cdp(202, "DOM.getDocument", {"depth": -1})
-                root_id = doc.get("result", {}).get("root", {}).get("nodeId", 0)
-                # 3. 查找第一个 input[type="file"]
-                qr = await send_cdp(203, "DOM.querySelector", {
-                    "nodeId": root_id,
-                    "selector": "input[type='file']"
+
+                # 用 JS 创建一个隐藏的 file input（如果不存在），插入到 body
+                create_res = await send_cdp(201, "Runtime.evaluate", {
+                    "expression": (
+                        "(function(){"
+                        " var inp=document.getElementById('__gemini_file_upload');"
+                        " if(!inp){"
+                        "   inp=document.createElement('input');"
+                        "   inp.id='__gemini_file_upload';"
+                        "   inp.type='file';"
+                        "   inp.style.display='none';"
+                        "   document.body.appendChild(inp);"
+                        " }"
+                        " return inp.id;"
+                        "})()"
+                    ),
+                    "returnByValue": False
                 })
-                file_node_id = qr.get("result", {}).get("nodeId", 0)
-                if file_node_id:
-                    # 4. 注入文件
-                    await send_cdp(204, "DOM.setFileInputFiles", {
-                        "nodeId": file_node_id,
+                obj_id = create_res.get("result", {}).get("result", {}).get("objectId")
+                if obj_id:
+                    await send_cdp(202, "DOM.setFileInputFiles", {
+                        "objectId": obj_id,
                         "files": [abs_path]
                     })
-                    # 5. 触发 change 事件让 Gemini 感知
-                    await exec_js(205, (
+                    log("File injected")
+                    # 触发 change 事件
+                    await exec_js(203, (
                         "(function(){"
-                        " var f=document.querySelector('input[type=\"file\"]');"
-                        " if(f){ f.dispatchEvent(new Event('change',{bubbles:true}));"
-                        "        f.dispatchEvent(new Event('input',{bubbles:true})); }"
+                        " var inp=document.getElementById('__gemini_file_upload');"
+                        " if(inp) inp.dispatchEvent(new Event('change',{bubbles:true}));"
+                        " return inp ? 'ok' : 'no-inp';"
                         "})();"
                     ))
-                    await asyncio.sleep(2.0)  # 等 Gemini 上传处理
-                    log("Image uploaded")
                 else:
-                    log("No file input found on page")
+                    log("Could not create hidden input")
+                await asyncio.sleep(2.0)
+
+            # ── 发送文本（无论是否传图，都聚焦输入框并填入文本）──
+            # 注意：文本注入必须在图片操作之后进行，且必须重新查找输入框
+            log("Now injecting text...")
 
             # ── 基准气泡数 ──
             js_count = "(function(){var s=['message-content','.message-content','gmat-rich-text','.model-response','[data-message-author-role=\"model\"]'];for(var i=0;i<s.length;i++){var e=document.querySelectorAll(s[i]);if(e.length>0)return e.length;}return 0;})();"
@@ -142,7 +155,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
             js_input = ("(function(){var b=document.querySelector('div[role=\"textbox\"],textarea,.rich-textarea,[contenteditable=\"true\"]');if(!b)return false;b.focus();"
                         f"if(b.tagName==='TEXTAREA'||b.tagName==='INPUT'){{b.value=`{escaped}`;}}"
                         f"else{{b.innerText=`{escaped}`;}}"
-                        "b.dispatchEvent(new Event('input',{bubbles:true}));return true;})();")
+                        "b.dispatchEvent(new Event('input',{bubbles:true,composed:true}));return true;})();")
             await exec_js(102, js_input)
             await asyncio.sleep(0.2)
             js_click = "(function(){var b=document.querySelector('button[aria-label*=\"Send\"],button[aria-label*=\"发送\"],.send-button');if(b){b.click();return true;}return false;})();"
@@ -160,7 +173,12 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 else: sl=len(ft); st=0
                 if st>=6: log("Captured, len:", len(ft)); break
             return ft
-    except Exception as e: return "ERROR: "+str(e)
+    except websockets.exceptions.ConnectionClosed as e:
+        log(f"WS closed: {e.code}:{e.reason}")
+        return "ERROR: WebSocket connection closed - Gemini tab may have crashed"
+    except Exception as e:
+        log(f"Unexpected: {type(e).__name__}: {e}")
+        return "ERROR: "+str(e)
 
 def setup_browser():
     lines=[]

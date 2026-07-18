@@ -101,27 +101,47 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── 注入 MutationObserver（一次连接只执行一次，无视 DOM 重建）──
+            # ── 注入 MutationObserver（Gemini 改进版：处理 addedNodes）──
             await exec_js(200, (
                 "(function(){"
                 " if(window.__GEMINI_OBSERVER) return 'already';"
                 " window.__GEMINI_LAST_RESP='';"
-                " var observer=new MutationObserver(function(){"
-                "  var all=document.querySelectorAll('message-content');"
-                "  if(all.length>0){"
-                "   var t=(all[all.length-1].innerText||'').trim();"
-                "   if(t.length>20) window.__GEMINI_LAST_RESP=t;"
+                " var extract=function(node){"
+                "  if(!node||node.nodeType!==1) return null;"
+                "  var el=node.matches('message-content')?node:node.querySelector('message-content');"
+                "  if(!el) return null;"
+                "  var t=(el.innerText||el.textContent||'').trim();"
+                "  return t.length>20?t:null;"
+                " };"
+                " var observer=new MutationObserver(function(mutations){"
+                "  for(var mi=0;mi<mutations.length;mi++){"
+                "   var m=mutations[mi];"
+                "   for(var j=0;j<m.addedNodes.length;j++){"
+                "    var nt=extract(m.addedNodes[j]);"
+                "    if(nt) window.__GEMINI_LAST_RESP=nt;"
+                "   }"
+                "   if(m.target&&m.target.querySelectorAll){"
+                "    var mcs=m.target.querySelectorAll('message-content');"
+                "    for(var k=0;k<mcs.length;k++){"
+                "     var t=(mcs[k].innerText||'').trim();"
+                "     if(t.length>20) window.__GEMINI_LAST_RESP=t;"
+                "    }"
+                "   }"
                 "  }"
                 " });"
                 " observer.observe(document.body,{childList:true,subtree:true,characterData:true});"
                 " window.__GEMINI_OBSERVER=observer;"
-                " return 'observer-installed';"
+                " return 'ok';"
                 "})();"
             ))
             log("MutationObserver installed")
 
-            # ── 每次发送前清空上次缓存 ──
-            await exec_js(201, "window.__GEMINI_LAST_RESP='';'ok';")
+            # ── 每次发送前：清空缓存 + 记录基准 count（去重用）──
+            await exec_js(201, (
+                "window.__GEMINI_LAST_RESP='';"
+                "window.__GEMINI_SENT_COUNT=document.querySelectorAll('message-content').length;"
+                "'ok';"
+            ))
 
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
@@ -200,13 +220,19 @@ async def ask_gemini_web(prompt_text, image_path=None):
             await exec_js(104, js_click)
             log("Injected, waiting for reply...")
 
-            # 回复检测：Observer 缓存优先，兜底直接扫描
+            # 回复检测：Observer 缓存 → 兜底扫描（跳过 sent_count 之前的旧消息）
             js_get = (
                 "(function(){"
                 " var c=window.__GEMINI_LAST_RESP;"
                 " if(c&&c.length>10) return c;"
                 " var all=document.querySelectorAll('message-content');"
-                " if(all.length===0) return 'WAIT';"
+                " if(all.length===0){"
+                "  var busy=document.querySelector('[aria-busy=\"true\"], mat-progress-bar');"
+                "  return busy?'PROCESSING':'WAIT';"
+                " }"
+                # 只扫描新消息（count > sent_count）
+                " var sent=window.__GEMINI_SENT_COUNT||0;"
+                " if(all.length<=sent) return 'WAIT';"
                 " for(var i=all.length-1;i>=0;i--){"
                 "  var t=(all[i].innerText||all[i].textContent||'').trim();"
                 "  if(t.length>10) return t;"
@@ -223,6 +249,10 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     log("JS eval error:", e)
                     stale += 1
                     if stale > 10: break
+                    await asyncio.sleep(1.0)
+                    continue
+                if ft=="PROCESSING":
+                    stale = 0  # 图片处理中，不计入超时
                     await asyncio.sleep(1.0)
                     continue
                 if ft=="WAIT" or not ft:

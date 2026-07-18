@@ -120,6 +120,9 @@ async def ask_gemini_web(prompt_text, image_path=None):
             ))
             log("MutationObserver installed")
 
+            # ── 每次发送前清空上次缓存 ──
+            await exec_js(201, "window.__GEMINI_LAST_RESP='';'cleared';")
+
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
                 log("Uploading image via paste simulation:", image_path)

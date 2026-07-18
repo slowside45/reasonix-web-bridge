@@ -106,8 +106,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 abs_path = os.path.abspath(image_path)
                 log("Clipboard upload:", abs_path)
                 try:
-                    import subprocess
-                    # 0. 先把 Edge 调到前台
+                    # 0. 先把 Edge 调到前台（恢复最小化 + 确保焦点）
                     fg_cmd = (
                         f'Add-Type @"\n'
                         f'using System;using System.Runtime.InteropServices;\n'
@@ -117,7 +116,12 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         f'if($ps){{[Win32]::SetForegroundWindow($ps.MainWindowHandle)}};\n'
                     )
                     subprocess.run(["powershell", "-Command", fg_cmd], capture_output=True, timeout=10)
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.0)  # 等窗口完全恢复
+                    # pyautogui 点击窗口左上角确保焦点
+                    import pyautogui
+                    pyautogui.click(200, 50)  # 点击标题栏区域
+                    await asyncio.sleep(0.5)
+                    log("Edge activated")
                     
                     # 1. 复制图片 + Ctrl+V
                     ps_cmd = (
@@ -137,7 +141,6 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         log(f"Clipboard may have failed: {result.stdout.strip()}")
                         raise Exception("Clipboard set failed")
                     log("Image in clipboard, sending Ctrl+V via pyautogui...")
-                    import pyautogui
                     pyautogui.hotkey('ctrl', 'v')
                     log("Ctrl+V sent, waiting for image to start uploading...")
                     # 等图片开始上传（预览出现、遮罩出现）

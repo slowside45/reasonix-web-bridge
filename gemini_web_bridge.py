@@ -101,33 +101,38 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── RPA 图片上传（原生文件对话框，绕过 isTrusted）──
+            # ── RPA 图片上传（pyautogui 物理点击 + 文件对话框）──
             if image_path and os.path.isfile(image_path):
                 abs_path = os.path.abspath(image_path)
                 log("RPA upload:", abs_path)
                 try:
                     import pyautogui, pyperclip
-                    btn_info = await exec_js(300, (
+                    # 1. 获取按钮在视口中的坐标 + 窗口在屏幕上的偏移
+                    pos_info = await exec_js(300, (
                         "(function(){"
                         " var b=document.querySelector('button[aria-label=\"Upload and tools\"]');"
                         " if(!b) return 'no-btn';"
                         " var r=b.getBoundingClientRect();"
-                        " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});"
+                        " return JSON.stringify({bx:r.left+r.width/2,by:r.top+r.height/2,"
+                        "  ow:window.outerWidth- window.innerWidth,oh:window.outerHeight-window.innerHeight});"
                         "})();"
                     ))
-                    btn = json.loads(btn_info.get("result",{}).get("result",{}).get("value","{}"))
-                    if not btn or btn.get("x") is None: raise Exception("no upload button")
-                    log(f"Clicking upload btn at ({btn['x']:.0f},{btn['y']:.0f})")
-                    await send_cdp(301, "Input.dispatchMouseEvent", {
-                        "type":"mousePressed","x":btn["x"],"y":btn["y"],"button":"left","clickCount":1})
-                    await send_cdp(302, "Input.dispatchMouseEvent", {
-                        "type":"mouseReleased","x":btn["x"],"y":btn["y"],"button":"left","clickCount":1})
-                    await asyncio.sleep(1.5)
+                    pos = json.loads(pos_info.get("result",{}).get("result",{}).get("value","{}"))
+                    if not pos or pos.get("bx") is None: raise Exception("no upload button")
+                    # 屏幕坐标 = 视口坐标 + 窗口边框偏移
+                    sx = pos["bx"] + (pos.get("ow", 0) or 0)
+                    sy = pos["by"] + (pos.get("oh", 0) or 40)  # 标题栏 ~40px
+                    log(f"RPA click at screen ({sx:.0f},{sy:.0f})")
+                    # 2. pyautogui 物理点击（真实鼠标，isTrusted=true）
+                    pyautogui.moveTo(sx, sy, duration=0.2)
+                    pyautogui.click()
+                    await asyncio.sleep(2.0)
+                    # 3. 文件对话框操作
                     pyperclip.copy(abs_path)
                     pyautogui.hotkey('ctrl','v')
                     await asyncio.sleep(0.5)
                     pyautogui.press('enter')
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(4.0)
                     log("RPA upload completed")
                 except Exception as e:
                     log(f"RPA failed: {e}")

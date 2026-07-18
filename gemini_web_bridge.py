@@ -102,7 +102,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── 注入 MutationObserver（简化版：每次 DOM 变化扫全部消息）──
+            # ── 注入 MutationObserver（简化版，阈值 2）──
             await exec_js(200, (
                 "(function(){"
                 " if(window.__GEMINI_OBSERVER) return 'already';"
@@ -111,37 +111,26 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 "  var all=document.querySelectorAll('message-content');"
                 "  for(var i=all.length-1;i>=0;i--){"
                 "   var t=(all[i].innerText||all[i].textContent||'').trim();"
-                "   if(t.length>10){window.__GEMINI_LAST_RESP=t;return;}"
+                "   if(t.length>1){window.__GEMINI_LAST_RESP=t;return;}"
                 "  }"
                 " };"
                 " var observer=new MutationObserver(scan);"
                 " observer.observe(document.body,{childList:true,subtree:true,characterData:true});"
                 " window.__GEMINI_OBSERVER=observer;"
-                " scan();"  # 立即执行一次
+                " scan();"
                 " return 'ok';"
                 "})();"
             ))
-            log("MutationObserver installed")
+            log("Observer installed")
 
-            # ── 每次发送前：清空缓存 + 记录所有已知消息摘要 ──
-            await exec_js(201, "window.__GEMINI_LAST_RESP='';'ok';")
-            # 获取 count + 所有消息文本摘要
-            snap_res = await exec_js(202, (
-                "(function(){"
-                " var a=document.querySelectorAll('message-content');"
-                " var texts=[];"
-                " for(var i=0;i<a.length;i++){texts.push((a[i].innerText||'').trim().substring(0,80));}"
-                " return JSON.stringify({count:a.length,texts:texts});"
-                "})();"
+            # ── 每次发送前：清空缓存 + 快照所有已知文本 ──
+            await exec_js(201, (
+                "window.__GEMINI_LAST_RESP='';"
+                "window.__KNOWN_TEXTS=new Set(Array.from("
+                " document.querySelectorAll('message-content')).map(function(m){"
+                "  return (m.innerText||'').trim().substring(0,80);}));"
+                "'ok';"
             ))
-            base_count = 0; known_texts = set()
-            try:
-                snap = json.loads(snap_res.get("result",{}).get("result",{}).get("value","{}"))
-                base_count = snap.get("count", 0)
-                known_texts = set(snap.get("texts", []))
-            except:
-                pass
-            log(f"Base: count={base_count}, known_texts={len(known_texts)}")
 
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
@@ -220,24 +209,18 @@ async def ask_gemini_web(prompt_text, image_path=None):
             await exec_js(104, js_click)
             log("Injected, waiting for reply...")
 
-            # 回复检测：Observer 缓存 → 兜底扫描（跳过 known_texts）
-            import json as _json
-            known_json = _json.dumps(list(known_texts))
+            # 回复检测：Observer 优先 → DOM 扫描（跳过 known_texts）
             js_get = (
                 "(function(){"
                 " var c=window.__GEMINI_LAST_RESP;"
-                " if(c&&c.length>10){"
-                "  var cp=(c||'').trim().substring(0,80);"
-                "  var kt=new Set(" + known_json + ");"
-                "  if(!kt.has(cp)) return c;"
+                " if(c&&typeof c==='string'&&c.trim().length>0){"
+                "  if(!window.__KNOWN_TEXTS.has(c.trim().substring(0,80))) return c;"
                 " }"
                 " var all=document.querySelectorAll('message-content');"
                 " if(all.length===0) return 'WAIT';"
-                " if(all.length<=" + str(base_count + 1) + ") return 'WAIT';"
-                " var kt2=new Set(" + known_json + ");"
                 " for(var i=all.length-1;i>=0;i--){"
                 "  var t=(all[i].innerText||all[i].textContent||'').trim();"
-                "  if(t.length>10&&!kt2.has(t.substring(0,80))) return t;"
+                "  if(t.length>0&&!window.__KNOWN_TEXTS.has(t.substring(0,80))) return t;"
                 " }"
                 " return 'WAIT';"
                 "})();"

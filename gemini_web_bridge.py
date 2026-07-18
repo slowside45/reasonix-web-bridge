@@ -99,7 +99,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 return json.loads(await ws.recv())
 
             async def exec_js(cid, js):
-                return await send_cdp(cid, "Runtime.evaluate", {"expression": js})
+                return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
             # ── 基准气泡数（在图片操作之前获取，避免 paste 清空 DOM）──
             base_count = 0; last_known_id = "none"

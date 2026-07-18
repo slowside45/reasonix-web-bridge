@@ -127,8 +127,16 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         f'[System.Windows.Forms.SendKeys]::SendWait("^v");\n'
                     )
                     subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=15)
-                    log("Image copied + Ctrl+V via PowerShell")
-                    await asyncio.sleep(3.0)
+                    log("Image pasted, waiting for upload...")
+                    # 等图片上传完成（预览出现）
+                    await asyncio.sleep(6.0)
+                    # 验证预览
+                    has_preview = await exec_js(303, (
+                        "(function(){"
+                        " return !!document.querySelector('.image-preview, [class*=\"preview\"], img[alt*=\"预览\"]');"
+                        "})();"
+                    ))
+                    log(f"Preview: {has_preview}")
                     
                 except Exception as e:
                     log(f"Clipboard upload failed: {e}")

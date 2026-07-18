@@ -101,40 +101,75 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── RPA 图片上传（pyautogui 物理点击 + 文件对话框）──
+            # ── RPA 图片上传（pyautogui 物理点击 + 菜单 + 文件对话框）──
             if image_path and os.path.isfile(image_path):
                 abs_path = os.path.abspath(image_path)
                 log("RPA upload:", abs_path)
                 try:
                     import pyautogui, pyperclip
-                    # 1. 获取按钮视口坐标 + 窗口在屏幕上的精确位置
+                    # 计算屏幕坐标的辅助函数
+                    def to_screen(pos):
+                        chrome_top = pos.get("oh",0) - pos.get("ih",0)
+                        return (pos["sx"] + pos["bx"], pos["sy"] + pos["by"] + (chrome_top if chrome_top > 0 else 40))
+                    
+                    # 1. 获取按钮坐标
                     pos_info = await exec_js(300, (
                         "(function(){"
                         " var b=document.querySelector('button[aria-label=\"Upload and tools\"]');"
                         " if(!b) return 'no-btn';"
                         " var r=b.getBoundingClientRect();"
-                        " return JSON.stringify({"
-                        "  bx:r.left+r.width/2, by:r.top+r.height/2,"
-                        "  sx:window.screenLeft||window.screenX||0,"
-                        "  sy:window.screenTop||window.screenY||0,"
-                        "  iw:window.innerWidth, ih:window.innerHeight,"
-                        "  ow:window.outerWidth, oh:window.outerHeight"
-                        " });"
+                        " return JSON.stringify({bx:r.left+r.width/2,by:r.top+r.height/2,"
+                        "  sx:window.screenLeft||window.screenX||0,sy:window.screenTop||window.screenY||0,"
+                        "  iw:window.innerWidth,ih:window.innerHeight,ow:window.outerWidth,oh:window.outerHeight});"
                         "})();"
                     ))
                     pos = json.loads(pos_info.get("result",{}).get("result",{}).get("value","{}"))
                     if not pos or pos.get("bx") is None: raise Exception("no upload button")
-                    # 屏幕坐标 = window屏幕左上角 + 按钮视口坐标 + 窗口chrome偏移
-                    # outerHeight-innerHeight 包含标题栏+边框
-                    chrome_top = pos.get("oh",0) - pos.get("ih",0)
-                    sx = pos["sx"] + pos["bx"]
-                    sy = pos["sy"] + pos["by"] + (chrome_top if chrome_top > 0 else 40)
-                    log(f"RPA click: viewport({pos['bx']:.0f},{pos['by']:.0f}) screen({sx:.0f},{sy:.0f})")
-                    # 2. pyautogui 物理点击（真实鼠标，isTrusted=true）
+                    
+                    # 2. pyautogui 点击 "Upload and tools"
+                    sx, sy = to_screen(pos)
+                    log(f"Step1: click Upload btn at screen({sx:.0f},{sy:.0f})")
                     pyautogui.moveTo(sx, sy, duration=0.2)
                     pyautogui.click()
+                    await asyncio.sleep(1.5)
+
+                    # 3. 扫描菜单（容错：失败就用位置兜底）
+                    mi = None
+                    try:
+                        menu_item = await exec_js(301, (
+                            "(function(){"
+                            " var items=document.querySelectorAll('[role=\"menuitem\"], .mat-menu-item, [class*=\"menu-item\"], .cdk-overlay-container button');"
+                            " for(var i=0;i<items.length;i++){"
+                            "  var el=items[i];"
+                            "  if(!el.offsetParent) continue;"
+                            "  var t=(el.innerText||el.textContent||'').trim().toLowerCase();"
+                            "  if(t.includes('upload')||t.includes('file')||t.includes('photo')||t.includes('image')||t.includes('picture')||t.includes('上载')||t.includes('文件')||t.includes('照片')||t.includes('图片')){"
+                            "   var r=el.getBoundingClientRect();"
+                            "   return JSON.stringify({text:t,bx:r.left+r.width/2,by:r.top+r.height/2});"
+                            "  }"
+                            " }"
+                            " return 'null';"
+                            "})();"
+                        ))
+                        raw = menu_item.get("result",{}).get("result",{}).get("value","null")
+                        if raw and raw != "null":
+                            mi = json.loads(raw)
+                    except:
+                        pass
+                    
+                    if mi and mi.get("bx") is not None:
+                        msx, msy = to_screen({**pos, "bx": mi["bx"], "by": mi["by"]})
+                        log(f"Step2: click '{mi.get('text','')}' at screen({msx:.0f},{msy:.0f})")
+                        pyautogui.moveTo(msx, msy, duration=0.1)
+                        pyautogui.click()
+                    else:
+                        # 兜底：点击按钮下方约 50px
+                        log(f"Step2 fallback: click below btn at ({sx:.0f},{sy+50:.0f})")
+                        pyautogui.moveTo(sx, sy + 50, duration=0.1)
+                        pyautogui.click()
                     await asyncio.sleep(2.0)
-                    # 3. 文件对话框操作
+
+                    # 4. 文件对话框操作
                     pyperclip.copy(abs_path)
                     pyautogui.hotkey('ctrl','v')
                     await asyncio.sleep(0.5)

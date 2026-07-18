@@ -106,26 +106,41 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 abs_path = os.path.abspath(image_path)
                 log("Clipboard upload:", abs_path)
                 try:
-                    # 1. PowerShell 将图片设置到系统剪贴板
+                    # 1. PowerShell 将图片数据设置到系统剪贴板
                     import subprocess
-                    ps_cmd = f'Set-Clipboard -Path "{abs_path}"'
+                    ps_cmd = (
+                        f'Add-Type -AssemblyName System.Windows.Forms;'
+                        f'Add-Type -AssemblyName System.Drawing;'
+                        f'$img = [System.Drawing.Image]::FromFile("{abs_path}");'
+                        f'[System.Windows.Forms.Clipboard]::SetImage($img);'
+                        f'$img.Dispose()'
+                    )
                     subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=10)
-                    log("Image copied to clipboard")
+                    log("Image data copied to clipboard")
                     
-                    # 2. 聚焦输入框
-                    await exec_js(300, (
+                    # 2. pyautogui 点击输入框获取真实 OS 焦点
+                    import pyautogui
+                    # 获取输入框屏幕坐标
+                    inp_pos = await exec_js(301, (
                         "(function(){"
                         " var b=document.querySelector('.ql-editor');"
-                        " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
+                        " if(!b) b=document.querySelector('rich-textarea');"
                         " if(!b) return 'no-input';"
-                        " b.focus(); b.click();"
-                        " return 'focused';"
+                        " var r=b.getBoundingClientRect();"
+                        " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2,"
+                        "  sx:window.screenLeft||0,sy:window.screenTop||0,oh:window.outerHeight,ih:window.innerHeight});"
                         "})();"
                     ))
-                    await asyncio.sleep(0.5)
+                    ip = json.loads(inp_pos.get("result",{}).get("result",{}).get("value","{}"))
+                    if ip and ip.get("x"):
+                        chrome_top = ip.get("oh",0) - ip.get("ih",0)
+                        ix = ip["sx"] + ip["x"]
+                        iy = ip["sy"] + ip["y"] + (chrome_top if chrome_top > 0 else 40)
+                        pyautogui.moveTo(ix, iy, duration=0.2)
+                        pyautogui.click()
+                        await asyncio.sleep(0.3)
                     
-                    # 3. pyautogui 物理 Ctrl+V（真实键盘事件）
-                    import pyautogui
+                    # 3. pyautogui 物理 Ctrl+V
                     pyautogui.hotkey('ctrl', 'v')
                     await asyncio.sleep(3.0)
                     log("Ctrl+V dispatched")

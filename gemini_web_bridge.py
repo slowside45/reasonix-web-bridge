@@ -106,21 +106,27 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 abs_path = os.path.abspath(image_path)
                 log("Clipboard upload:", abs_path)
                 try:
-                    # 0. 先把 Edge 调到前台（恢复最小化 + 确保焦点）
+                    # 0. 把 Edge 调到前台（SW_RESTORE + SetForegroundWindow + BringWindowToTop）
                     fg_cmd = (
                         f'Add-Type @"\n'
                         f'using System;using System.Runtime.InteropServices;\n'
-                        f'public class Win32{{[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);}}\n'
+                        f'public class Win32{{\n'
+                        f'[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr h,int nCmdShow);\n'
+                        f'[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);\n'
+                        f'[DllImport("user32.dll")]public static extern bool BringWindowToTop(IntPtr h);\n'
+                        f'}}\n'
                         f'"@;\n'
                         f'$ps = Get-Process | Where-Object {{$_.MainWindowTitle -like "*Gemini*"}} | Select-Object -First 1;\n'
-                        f'if($ps){{[Win32]::SetForegroundWindow($ps.MainWindowHandle)}};\n'
+                        f'if($ps){{\n'
+                        f'  $h=$ps.MainWindowHandle;\n'
+                        f'  [Win32]::ShowWindow($h,9);\n'  # SW_RESTORE
+                        f'  Start-Sleep -Milliseconds 500;\n'
+                        f'  [Win32]::BringWindowToTop($h);\n'
+                        f'  [Win32]::SetForegroundWindow($h);\n'
+                        f'}}\n'
                     )
                     subprocess.run(["powershell", "-Command", fg_cmd], capture_output=True, timeout=10)
-                    await asyncio.sleep(2.0)  # 等窗口完全恢复
-                    # pyautogui 点击窗口左上角确保焦点
-                    import pyautogui
-                    pyautogui.click(200, 50)  # 点击标题栏区域
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.5)
                     log("Edge activated")
                     
                     # 1. 复制图片 + Ctrl+V

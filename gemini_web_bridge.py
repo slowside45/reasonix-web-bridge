@@ -101,6 +101,21 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js})
 
+            # ── 基准气泡数（在图片操作之前获取，避免 paste 清空 DOM）──
+            base_count = 0; last_known_id = "none"
+            js_base = ("(function(){"
+                       " var a=document.querySelectorAll('message-content');"
+                       " return JSON.stringify({count:a.length, lastId:a.length?a[a.length-1].id:'none'});"
+                       "})();")
+            base_res = await exec_js(101, js_base)
+            try:
+                base_info = json.loads(base_res.get("result",{}).get("result",{}).get("value","{}"))
+            except:
+                base_info = {"count": 0, "lastId": "none"}
+            base_count = base_info.get("count", 0)
+            last_known_id = base_info.get("lastId", "none")
+            log(f"Base: count={base_count}, lastId={last_known_id}")
+
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
                 log("Uploading image via paste simulation:", image_path)
@@ -147,7 +162,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         })
                         log("File injected into input, dispatching paste event...")
 
-                        # 步骤3：通过 DataTransfer + ClipboardEvent 模拟 Ctrl+V 粘贴（同步执行，避免 Promise 问题）
+                        # 步骤3：通过 DataTransfer + ClipboardEvent 模拟 Ctrl+V 粘贴
                         paste_js = (
                             "(function(){"
                             " var fi=document.querySelector('input[type=\"file\"]');"
@@ -164,51 +179,108 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         )
                         await exec_js(207, paste_js)
                         log("Paste event dispatched")
-                        # 等待 Gemini 处理上传（图片预览出现）
                         await asyncio.sleep(3.0)
                     else:
-                        log("Cannot find or create file input — image upload skipped")
+                        # 创建隐藏 input 兜底 — 需要刷新 DOM
+                        log("No native file input, creating hidden input")
+                        await exec_js(204, (
+                            "(function(){"
+                            " var inp=document.createElement('input');"
+                            " inp.id='__gemini_fallback_upload';"
+                            " inp.type='file';"
+                            " inp.style.display='none';"
+                            " document.body.appendChild(inp);"
+                            " return inp.id;"
+                            "})();"
+                        ))
+                        # 重新获取 DOM 树
+                        doc2 = await send_cdp(205, "DOM.getDocument", {"depth": -1})
+                        root_id2 = doc2.get("result", {}).get("root", {}).get("nodeId", 0)
+                        if root_id2:
+                            qr2 = await send_cdp(206, "DOM.querySelector", {
+                                "nodeId": root_id2,
+                                "selector": "#__gemini_fallback_upload"
+                            })
+                            file_node_id = qr2.get("result", {}).get("nodeId", 0)
+                        if file_node_id:
+                            await send_cdp(207, "DOM.setFileInputFiles", {
+                                "nodeId": file_node_id,
+                                "files": [abs_path]
+                            })
+                            # 触发 change + paste
+                            await exec_js(208, (
+                                "(function(){"
+                                " var fi=document.getElementById('__gemini_fallback_upload');"
+                                " if(!fi||!fi.files||fi.files.length===0) return 'no-files';"
+                                " var dt=new DataTransfer();"
+                                " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
+                                " var tb=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"]');"
+                                " if(!tb) return 'no-textbox';"
+                                " tb.focus();"
+                                " var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});"
+                                " tb.dispatchEvent(pe);"
+                                " return 'paste-ok fallback';"
+                                "})();"
+                            ))
+                            log("Fallback paste dispatched")
+                            await asyncio.sleep(3.0)
+                        else:
+                            log("Cannot find or create file input — image upload skipped")
 
             # ── 发送文本（无论是否传图）──
             log("Now injecting text...")
 
-            # ── 基准气泡数（message-content 是 Gemini 自定义元素，最可靠）──
-            js_count = "(function(){return document.querySelectorAll('message-content').length;})();"
-            old_res = await exec_js(101, js_count)
-            old_count = old_res.get("result",{}).get("result",{}).get("value",0) or 0
-            log("Base bubbles:", old_count)
-
-            # 文本注入：需要精确定位 rich-textarea 内的 contenteditable div
-            escaped = prompt_text.replace("\\","\\\\").replace("`","\\`").replace("$","\\$")
-            js_input = (
+            # 文本注入：使用 CDP Input.insertText（Quill 只接受真实输入事件）
+            log("Injecting text via Input.insertText...")
+            # 先聚焦输入框
+            await exec_js(102, (
                 "(function(){"
-                # rich-textarea 包含 ql-editor contenteditable div；也兼容 div[role=\"textbox\"]
-                " var b=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"][contenteditable=\"true\"], [contenteditable=\"true\"]');"
+                " var b=document.querySelector('.ql-editor');"
+                " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
                 " if(!b) return 'no-input';"
-                " b.focus();"
-                " b.innerHTML='';"  # 清空避免残留
-                f" var ok=document.execCommand('insertText',false,`{escaped}`);"
-                " if(!ok) { b.innerText=`" + escaped + "`; b.dispatchEvent(new Event('input',{bubbles:true,composed:true})); }"
-                " return JSON.stringify({ok:ok, tag:b.tagName, text_len:(b.innerText||'').length});"
+                " b.focus(); b.click();"
+                " return 'focused';"
                 "})();"
-            )
-            await exec_js(102, js_input)
+            ))
+            await asyncio.sleep(0.1)
+            # 用 Input.insertText 逐段注入（中文友好，触发 Quill 内部状态更新）
+            await send_cdp(103, "Input.insertText", {"text": prompt_text})
             await asyncio.sleep(0.3)
             js_click = "(function(){var b=document.querySelector('button[aria-label*=\"Send\"],button[aria-label*=\"发送\"],.send-button');if(b){b.click();return true;}return false;})();"
-            await exec_js(103, js_click)
-            log("Injected, waiting...")
-            # 回复检测也改用 message-content
-            js_get = ("(function(){var base="+str(old_count)+
-                      ";var e=document.querySelectorAll('message-content');if(e.length>base){var t=e[e.length-1].innerText||e[e.length-1].textContent;if(t&&t.trim().length>0)return t.trim();}return 'WAIT';})();")
-            sl=0; st=0; ft=""; await asyncio.sleep(3.0)
+            await exec_js(104, js_click)
+            log("Injected, waiting for reply...")
+
+            # ── 回复检测：等新消息出现，要求长度 > 50 过滤短用户消息 ──
+            js_get = ("(function(){"
+                      " var base=" + str(base_count) + ";"
+                      " var all=document.querySelectorAll('message-content');"
+                      " if(all.length>base){"
+                      "  var t=(all[all.length-1].innerText||all[all.length-1].textContent||'').trim();"
+                      "  if(t.length>50) return t;"  # 模型回复通常 > 50 字符
+                      " }"
+                      " return 'WAIT';"
+                      "})();")
+            sl=0; st=0; ft=""; stale=0; await asyncio.sleep(3.0)
             while True:
-                await asyncio.sleep(0.5)
-                ro = await exec_js(104, js_get)
-                ft = str(ro.get("result",{}).get("result",{}).get("value","") or "")
-                if ft=="WAIT" or not ft: continue
+                await asyncio.sleep(1.0)
+                try:
+                    ro = await exec_js(104, js_get)
+                    ft = str(ro.get("result",{}).get("result",{}).get("value","") or "")
+                except Exception as e:
+                    log("JS eval error:", e)
+                    stale += 1
+                    if stale > 10: break
+                    continue
+                if ft=="WAIT" or not ft:
+                    stale += 1
+                    if stale > 60:  # 最多等 60 秒
+                        log("Timeout waiting for reply")
+                        return "ERROR: Gemini did not respond within 60 seconds"
+                    continue
+                stale = 0
                 if len(ft)==sl and len(ft)>0: st+=1
                 else: sl=len(ft); st=0
-                if st>=6: log("Captured, len:", len(ft)); break
+                if st>=3: log("Captured, len:", len(ft)); break
             return ft
     except websockets.exceptions.ConnectionClosed as e:
         log(f"WS closed: {e.code}:{e.reason}")

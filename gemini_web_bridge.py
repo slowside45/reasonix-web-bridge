@@ -131,30 +131,55 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     log("Image in clipboard, sending Ctrl+V via pyautogui...")
                     import pyautogui
                     pyautogui.hotkey('ctrl', 'v')
-                    log("Ctrl+V sent, waiting for upload complete...")
-                    
                     log("Ctrl+V sent, waiting for upload...")
-                    # 简单可靠：等预览出现 → 固定等待上传完成
-                    preview_ok = False
-                    for retry in range(20):
+                    # 先等预览出现（确认粘贴成功）
+                    await asyncio.sleep(1.0)
+                    # 先注入文字（文字触发 Send message 按钮出现）
+                    await exec_js(102, (
+                        "(function(){"
+                        " var b=document.querySelector('.ql-editor');"
+                        " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
+                        " if(!b) return 'no-input';"
+                        " b.focus(); b.click();"
+                        " return 'focused';"
+                        "})();"
+                    ))
+                    await asyncio.sleep(0.1)
+                    await send_cdp(103, "Input.insertText", {"text": prompt_text})
+                    log("Text injected, waiting for Send button to enable...")
+                    
+                    # 轮询：等 "Send message" 按钮出现且 enabled
+                    for retry in range(60):
                         await asyncio.sleep(0.5)
-                        has_preview = await exec_js(304, (
-                            "!!document.querySelector('[class*=\"preview\"], [class*=\"thumbnail\"], [class*=\"upload\"] img');"
+                        status = await exec_js(304, (
+                            "(function(){"
+                            " var btn=document.querySelector('button[aria-label=\"Send message\"]');"
+                            " return JSON.stringify({disabled:btn?btn.disabled:null,visible:btn?btn.offsetParent!==null:false});"
+                            "})();"
                         ))
                         try:
-                            if has_preview.get("result",{}).get("result",{}).get("value"):
-                                preview_ok = True
-                                log(f"Preview appeared at {retry*0.5:.0f}s")
-                                break
-                        except: pass
-                    if preview_ok:
-                        await asyncio.sleep(8.0)  # 等上传完成
-                        log("Upload should be complete")
+                            st = json.loads(status.get("result",{}).get("result",{}).get("value","{}"))
+                        except:
+                            st = {}
+                        if st.get("disabled") is False and st.get("visible"):
+                            log(f"Send button ready at {retry*0.5:.0f}s")
+                            break
                     else:
-                        log("No preview detected, proceeding anyway")
+                        log("Send button wait timeout, clicking anyway")
+                    
+                    # 点击发送（跳过下面的文本注入和发送，直接跳到回复检测）
+                    js_click_code = "(function(){var b=document.querySelector('button[aria-label=\"Send message\"]');if(b){b.click();return true;}return false;})();"
+                    await exec_js(310, js_click_code)
+                    log("Send clicked, moving to reply detection...")
                     
                 except Exception as e:
                     log(f"Clipboard upload failed: {e}")
+                    image_sent = False
+                else:
+                    image_sent = True
+
+            else:
+                image_sent = False
 
             # ── 注入 MutationObserver（简化版，阈值 2）──
             await exec_js(200, (
@@ -186,28 +211,25 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 "'ok';"
             ))
 
-            # ── 发送文本（无论是否传图）──
-            log("Now injecting text...")
-
-            # 文本注入：使用 CDP Input.insertText（Quill 只接受真实输入事件）
-            log("Injecting text via Input.insertText...")
-            # 先聚焦输入框
-            await exec_js(102, (
-                "(function(){"
-                " var b=document.querySelector('.ql-editor');"
-                " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
-                " if(!b) return 'no-input';"
-                " b.focus(); b.click();"
-                " return 'focused';"
-                "})();"
-            ))
-            await asyncio.sleep(0.1)
-            # 用 Input.insertText 逐段注入（中文友好，触发 Quill 内部状态更新）
-            await send_cdp(103, "Input.insertText", {"text": prompt_text})
-            await asyncio.sleep(0.3)
-            js_click = "(function(){var b=document.querySelector('button[aria-label*=\"Send\"],button[aria-label*=\"发送\"],.send-button');if(b){b.click();return true;}return false;})();"
-            await exec_js(104, js_click)
-            log("Injected, waiting for reply...")
+            # ── 发送文本（仅纯文本模式，图片模式已在上面完成）──
+            if not image_sent:
+                log("Now injecting text...")
+                log("Injecting text via Input.insertText...")
+                await exec_js(102, (
+                    "(function(){"
+                    " var b=document.querySelector('.ql-editor');"
+                    " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
+                    " if(!b) return 'no-input';"
+                    " b.focus(); b.click();"
+                    " return 'focused';"
+                    "})();"
+                ))
+                await asyncio.sleep(0.1)
+                await send_cdp(103, "Input.insertText", {"text": prompt_text})
+                await asyncio.sleep(0.3)
+                js_click = "(function(){var b=document.querySelector('button[aria-label*=\"Send\"],button[aria-label*=\"发送\"],.send-button');if(b){b.click();return true;}return false;})();"
+                await exec_js(104, js_click)
+                log("Injected, waiting for reply...")
 
             # 回复检测：Observer 优先 → DOM 扫描（跳过 known_texts）
             js_get = (

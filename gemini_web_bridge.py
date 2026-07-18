@@ -106,9 +106,20 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 abs_path = os.path.abspath(image_path)
                 log("Clipboard upload:", abs_path)
                 try:
-                    # 1. PowerShell: 复制图片到剪贴板 + 激活 Gemini 窗口 + Ctrl+V
                     import subprocess
-                    # 先记录当前预览数量
+                    # 0. 先把 Edge 调到前台
+                    fg_cmd = (
+                        f'Add-Type @"\n'
+                        f'using System;using System.Runtime.InteropServices;\n'
+                        f'public class Win32{{[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);}}\n'
+                        f'"@;\n'
+                        f'$ps = Get-Process | Where-Object {{$_.MainWindowTitle -like "*Gemini*"}} | Select-Object -First 1;\n'
+                        f'if($ps){{[Win32]::SetForegroundWindow($ps.MainWindowHandle)}};\n'
+                    )
+                    subprocess.run(["powershell", "-Command", fg_cmd], capture_output=True, timeout=10)
+                    await asyncio.sleep(1.0)
+                    
+                    # 1. 复制图片 + Ctrl+V
                     old_count = await exec_js(303, (
                         "(function(){"
                         " return document.querySelectorAll('[class*=\"preview\"], [class*=\"upload\"], img[alt*=\"预览\"]').length;"
@@ -124,17 +135,14 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         f'$img = [System.Drawing.Image]::FromFile("{abs_path}");'
                         f'[System.Windows.Forms.Clipboard]::SetImage($img);'
                         f'$img.Dispose();'
-                        f'Add-Type @\"\n'
-                        f'using System;using System.Runtime.InteropServices;\n'
-                        f'public class Win32{{[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);}}\n'
-                        f'\"@;\n'
-                        f'$ps = Get-Process | Where-Object {{$_.MainWindowTitle -like "*Gemini*"}} | Select-Object -First 1;\n'
-                        f'if($ps){{[Win32]::SetForegroundWindow($ps.MainWindowHandle)}};\n'
-                        f'Start-Sleep -Milliseconds 500;\n'
-                        f'[System.Windows.Forms.SendKeys]::SendWait("^v");\n'
                     )
-                    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=15)
-                    log("Ctrl+V sent, waiting for new preview...")
+                    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=10)
+                    log("Image in clipboard, sending Ctrl+V via pyautogui...")
+                    
+                    # pyautogui 物理 Ctrl+V（比 SendKeys 更可靠）
+                    import pyautogui
+                    pyautogui.hotkey('ctrl', 'v')
+                    log("Ctrl+V sent, waiting...")
                     
                     # 等新预览出现（数量增加）
                     for retry in range(12):

@@ -106,44 +106,29 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 abs_path = os.path.abspath(image_path)
                 log("Clipboard upload:", abs_path)
                 try:
-                    # 1. PowerShell 将图片数据设置到系统剪贴板
+                    # 1. PowerShell: 复制图片到剪贴板 + 激活 Gemini 窗口 + Ctrl+V
                     import subprocess
                     ps_cmd = (
                         f'Add-Type -AssemblyName System.Windows.Forms;'
                         f'Add-Type -AssemblyName System.Drawing;'
                         f'$img = [System.Drawing.Image]::FromFile("{abs_path}");'
                         f'[System.Windows.Forms.Clipboard]::SetImage($img);'
-                        f'$img.Dispose()'
+                        f'$img.Dispose();'
+                        # 激活 Gemini 窗口（标题包含 "Gemini"）
+                        f'Add-Type @\"\n'
+                        f'using System;using System.Runtime.InteropServices;\n'
+                        f'public class Win32{{[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);}}\n'
+                        f'\"@;\n'
+                        f'$ps = Get-Process | Where-Object {{$_.MainWindowTitle -like "*Gemini*"}} | Select-Object -First 1;\n'
+                        f'if($ps){{[Win32]::SetForegroundWindow($ps.MainWindowHandle)}};\n'
+                        # 等待激活
+                        f'Start-Sleep -Milliseconds 500;\n'
+                        # 发送 Ctrl+V
+                        f'[System.Windows.Forms.SendKeys]::SendWait("^v");\n'
                     )
-                    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=10)
-                    log("Image data copied to clipboard")
-                    
-                    # 2. pyautogui 点击输入框获取真实 OS 焦点
-                    import pyautogui
-                    # 获取输入框屏幕坐标
-                    inp_pos = await exec_js(301, (
-                        "(function(){"
-                        " var b=document.querySelector('.ql-editor');"
-                        " if(!b) b=document.querySelector('rich-textarea');"
-                        " if(!b) return 'no-input';"
-                        " var r=b.getBoundingClientRect();"
-                        " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2,"
-                        "  sx:window.screenLeft||0,sy:window.screenTop||0,oh:window.outerHeight,ih:window.innerHeight});"
-                        "})();"
-                    ))
-                    ip = json.loads(inp_pos.get("result",{}).get("result",{}).get("value","{}"))
-                    if ip and ip.get("x"):
-                        chrome_top = ip.get("oh",0) - ip.get("ih",0)
-                        ix = ip["sx"] + ip["x"]
-                        iy = ip["sy"] + ip["y"] + (chrome_top if chrome_top > 0 else 40)
-                        pyautogui.moveTo(ix, iy, duration=0.2)
-                        pyautogui.click()
-                        await asyncio.sleep(0.3)
-                    
-                    # 3. pyautogui 物理 Ctrl+V
-                    pyautogui.hotkey('ctrl', 'v')
+                    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=15)
+                    log("Image copied + Ctrl+V via PowerShell")
                     await asyncio.sleep(3.0)
-                    log("Ctrl+V dispatched")
                     
                 except Exception as e:
                     log(f"Clipboard upload failed: {e}")

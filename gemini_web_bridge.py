@@ -126,47 +126,18 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     pos = json.loads(pos_info.get("result",{}).get("result",{}).get("value","{}"))
                     if not pos or pos.get("bx") is None: raise Exception("no upload button")
                     
-                    # 2. pyautogui 点击 "Upload and tools"
+                    # 2. pyautogui 点击 "Upload and tools" → 等待菜单 → 方向键导航
                     sx, sy = to_screen(pos)
                     log(f"Step1: click Upload btn at screen({sx:.0f},{sy:.0f})")
                     pyautogui.moveTo(sx, sy, duration=0.2)
                     pyautogui.click()
                     await asyncio.sleep(1.5)
-
-                    # 3. 扫描菜单（容错：失败就用位置兜底）
-                    mi = None
-                    try:
-                        menu_item = await exec_js(301, (
-                            "(function(){"
-                            " var items=document.querySelectorAll('[role=\"menuitem\"], .mat-menu-item, [class*=\"menu-item\"], .cdk-overlay-container button');"
-                            " for(var i=0;i<items.length;i++){"
-                            "  var el=items[i];"
-                            "  if(!el.offsetParent) continue;"
-                            "  var t=(el.innerText||el.textContent||'').trim().toLowerCase();"
-                            "  if(t.includes('upload')||t.includes('file')||t.includes('photo')||t.includes('image')||t.includes('picture')||t.includes('上载')||t.includes('文件')||t.includes('照片')||t.includes('图片')){"
-                            "   var r=el.getBoundingClientRect();"
-                            "   return JSON.stringify({text:t,bx:r.left+r.width/2,by:r.top+r.height/2});"
-                            "  }"
-                            " }"
-                            " return 'null';"
-                            "})();"
-                        ))
-                        raw = menu_item.get("result",{}).get("result",{}).get("value","null")
-                        if raw and raw != "null":
-                            mi = json.loads(raw)
-                    except:
-                        pass
                     
-                    if mi and mi.get("bx") is not None:
-                        msx, msy = to_screen({**pos, "bx": mi["bx"], "by": mi["by"]})
-                        log(f"Step2: click '{mi.get('text','')}' at screen({msx:.0f},{msy:.0f})")
-                        pyautogui.moveTo(msx, msy, duration=0.1)
-                        pyautogui.click()
-                    else:
-                        # 兜底：点击按钮下方约 50px
-                        log(f"Step2 fallback: click below btn at ({sx:.0f},{sy+50:.0f})")
-                        pyautogui.moveTo(sx, sy + 50, duration=0.1)
-                        pyautogui.click()
+                    # 尝试用方向键导航菜单（比位置猜测更可靠）
+                    pyautogui.press('down')  # 选第一个菜单项
+                    await asyncio.sleep(0.3)
+                    pyautogui.press('enter')  # 确认
+                    await asyncio.sleep(2.0)
                     await asyncio.sleep(2.0)
 
                     # 4. 文件对话框操作

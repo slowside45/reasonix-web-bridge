@@ -65,4 +65,4 @@ reasonix-web-bridge/
 
 ## 致谢
 
-灵感来自 @ziwang-Physics AgentChat 项目。
+灵感来自 @ziwang-Physics AgentChat 项目，地址：https://github.com/ziwang-Physics/AgentChat。

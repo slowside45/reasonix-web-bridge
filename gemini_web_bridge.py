@@ -121,26 +121,39 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     
                     # 1. 复制图片 + Ctrl+V
                     ps_cmd = (
+                        f'[System.Windows.Forms.Clipboard]::Clear();'
                         f'Add-Type -AssemblyName System.Windows.Forms;'
                         f'Add-Type -AssemblyName System.Drawing;'
                         f'$img = [System.Drawing.Image]::FromFile("{abs_path}");'
                         f'[System.Windows.Forms.Clipboard]::SetImage($img);'
                         f'$img.Dispose();'
+                        # 验证
+                        f'if([System.Windows.Forms.Clipboard]::ContainsImage()){{Write-Host "CLIPBOARD_OK"}}else{{Write-Host "CLIPBOARD_FAIL"}}'
                     )
-                    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=10)
+                    result = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, text=True, timeout=10)
+                    if "CLIPBOARD_OK" in (result.stdout or ""):
+                        log("Clipboard verified OK")
+                    else:
+                        log(f"Clipboard may have failed: {result.stdout.strip()}")
+                        raise Exception("Clipboard set failed")
                     log("Image in clipboard, sending Ctrl+V via pyautogui...")
                     import pyautogui
                     pyautogui.hotkey('ctrl', 'v')
                     log("Ctrl+V sent, waiting for upload...")
                     # 先等预览出现（确认粘贴成功）
                     await asyncio.sleep(1.0)
-                    # 先注入文字（文字触发 Send message 按钮出现）
-                    await exec_js(102, (
+                    # 注入文字（追加模式，不清除图片预览）
+                    await exec_js(302, (
                         "(function(){"
                         " var b=document.querySelector('.ql-editor');"
                         " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
                         " if(!b) return 'no-input';"
-                        " b.focus(); b.click();"
+                        " b.focus();"
+                        # 光标移到末尾
+                        " var sel=window.getSelection();"
+                        " var r=document.createRange();"
+                        " r.selectNodeContents(b); r.collapse(false);"
+                        " sel.removeAllRanges(); sel.addRange(r);"
                         " return 'focused';"
                         "})();"
                     ))

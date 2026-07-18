@@ -108,35 +108,51 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 try:
                     # 1. PowerShell: 复制图片到剪贴板 + 激活 Gemini 窗口 + Ctrl+V
                     import subprocess
+                    # 先记录当前预览数量
+                    old_count = await exec_js(303, (
+                        "(function(){"
+                        " return document.querySelectorAll('[class*=\"preview\"], [class*=\"upload\"], img[alt*=\"预览\"]').length;"
+                        "})();"
+                    ))
+                    try: old_n = int(old_count.get("result",{}).get("result",{}).get("value",0) or 0)
+                    except: old_n = 0
+                    log(f"Existing previews: {old_n}")
+                    
                     ps_cmd = (
                         f'Add-Type -AssemblyName System.Windows.Forms;'
                         f'Add-Type -AssemblyName System.Drawing;'
                         f'$img = [System.Drawing.Image]::FromFile("{abs_path}");'
                         f'[System.Windows.Forms.Clipboard]::SetImage($img);'
                         f'$img.Dispose();'
-                        # 激活 Gemini 窗口（标题包含 "Gemini"）
                         f'Add-Type @\"\n'
                         f'using System;using System.Runtime.InteropServices;\n'
                         f'public class Win32{{[DllImport("user32.dll")]public static extern bool SetForegroundWindow(IntPtr h);}}\n'
                         f'\"@;\n'
                         f'$ps = Get-Process | Where-Object {{$_.MainWindowTitle -like "*Gemini*"}} | Select-Object -First 1;\n'
                         f'if($ps){{[Win32]::SetForegroundWindow($ps.MainWindowHandle)}};\n'
-                        # 等待激活
                         f'Start-Sleep -Milliseconds 500;\n'
-                        # 发送 Ctrl+V
                         f'[System.Windows.Forms.SendKeys]::SendWait("^v");\n'
                     )
                     subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=15)
-                    log("Image pasted, waiting for upload...")
-                    # 等图片上传完成（预览出现）
-                    await asyncio.sleep(6.0)
-                    # 验证预览
-                    has_preview = await exec_js(303, (
-                        "(function(){"
-                        " return !!document.querySelector('.image-preview, [class*=\"preview\"], img[alt*=\"预览\"]');"
-                        "})();"
-                    ))
-                    log(f"Preview: {has_preview}")
+                    log("Ctrl+V sent, waiting for new preview...")
+                    
+                    # 等新预览出现（数量增加）
+                    for retry in range(12):
+                        await asyncio.sleep(1.0)
+                        new_count = await exec_js(304, (
+                            "(function(){"
+                            " return document.querySelectorAll('[class*=\"preview\"], [class*=\"upload\"], img[alt*=\"预览\"]').length;"
+                            "})();"
+                        ))
+                        try: new_n = int(new_count.get("result",{}).get("result",{}).get("value",0) or 0)
+                        except: new_n = old_n
+                        if new_n > old_n:
+                            log(f"New preview detected! ({old_n}->{new_n})")
+                            # 等上传彻底完成
+                            await asyncio.sleep(5.0)
+                            break
+                    else:
+                        log(f"Preview count unchanged ({old_n})")
                     
                 except Exception as e:
                     log(f"Clipboard upload failed: {e}")

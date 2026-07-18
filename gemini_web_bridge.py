@@ -171,12 +171,14 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         "(function(){"
                         " var fi=document.querySelector('input[type=\"file\"]:not([accept])');"
                         " if(!fi||!fi.files||fi.files.length===0) return 'no-files';"
-                        " var dt=new DataTransfer();"
-                        " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
                         " var tb=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"]');"
                         " if(!tb) return 'no-textbox';"
                         " tb.focus();"
+                        " var dt=new DataTransfer();"
+                        " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
+                        " tb.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'insertFromPaste',dataTransfer:dt}));"
                         " tb.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt}));"
+                        " tb.dispatchEvent(new Event('input',{bubbles:true}));"
                         " return 'paste-ok';"
                         "})();"
                     ))
@@ -224,8 +226,9 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 " return 'WAIT';"
                 "})();"
             )
-            sl=0; st=0; ft=""; stale=0; await asyncio.sleep(3.0)
+            sl=0; st=0; ft=""; stale=0; start_ts = asyncio.get_event_loop().time(); await asyncio.sleep(5.0)
             while True:
+                await asyncio.sleep(0.5)
                 try:
                     ro = await exec_js(105, js_get)
                     ft = str(ro.get("result",{}).get("result",{}).get("value","") or "")
@@ -249,7 +252,8 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 stale = 0
                 if len(ft)==sl and len(ft)>0: st+=1
                 else: sl=len(ft); st=0
-                if st>=3: log("Captured, len:", len(ft)); break
+                elapsed = asyncio.get_event_loop().time() - start_ts
+                if elapsed > 5 and st >= 10: log("Captured, len:", len(ft)); break
             return ft
     except websockets.exceptions.ConnectionClosed as e:
         log(f"WS closed: {e.code}:{e.reason}")

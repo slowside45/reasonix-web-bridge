@@ -8,3 +8,5 @@ dist/
 build/
 edge_debug.log
 .DS_Store
+_test_send.py
+.reasonix/desktop-topic-*

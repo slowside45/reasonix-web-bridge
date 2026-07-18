@@ -189,16 +189,19 @@ def setup_browser():
         lines.append(("OK " if rd else "WARN ")+msg)
         return "\n".join(lines)
     if not BROWSER: return "FAIL No browser found. Install Chrome or Edge."
-    cmd=[BROWSER["path"],f"--remote-debugging-port={CDP_PORT}",f"--user-data-dir={USER_DATA_DIR}","--no-first-run","--no-default-browser-check","https://gemini.google.com"]
+    cmd=[BROWSER["path"],f"--remote-debugging-port={CDP_PORT}",f"--user-data-dir={USER_DATA_DIR}","--no-first-run","--no-default-browser-check","--disable-background-mode","https://gemini.google.com"]
     try:
-        if PLATFORM=="Windows": subprocess.Popen(cmd,creationflags=subprocess.DETACHED_PROCESS)
-        else: subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        if PLATFORM=="Windows":
+            subprocess.Popen(cmd, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         lines.append("OK Launched "+BROWSER["display"]+" on port "+str(CDP_PORT))
         lines.append("   Please LOG IN at gemini.google.com")
     except Exception as e: lines.append("FAIL "+str(e))
     return "\n".join(lines)
 
-SN="gemini-web-bridge"; SV="2.0.0"
+SN="gemini-web-bridge"; SV="2.2.0"
 TOOLS=[{"name":"ask_gemini_web","description":"Send prompt (and optionally an image) to Gemini in Chrome/Edge. Set image_path to a local image file for vision analysis. Returns full reply.","inputSchema":{"type":"object","properties":{"prompt":{"type":"string","description":"The prompt to send"},"image_path":{"type":"string","description":"Optional: absolute path to an image file for Gemini vision analysis"}},"required":["prompt"]}},{"name":"setup_gemini_browser","description":"Auto-detect and launch Chrome/Edge with debug port.","inputSchema":{"type":"object","properties":{},"required":[]}},{"name":"check_gemini_status","description":"Check browser+Gemini status.","inputSchema":{"type":"object","properties":{},"required":[]}}]
 def mr(i,r): return json.dumps({"jsonrpc":"2.0","id":i,"result":r},ensure_ascii=False)
 def me(i,c,m): return json.dumps({"jsonrpc":"2.0","id":i,"error":{"code":c,"message":m}},ensure_ascii=False)

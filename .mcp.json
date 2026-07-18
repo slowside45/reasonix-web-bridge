@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "gemini-web-bridge": {
+      "command": "python",
+      "args": ["gemini_web_bridge.py"],
+      "alwaysAllow": true,
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "GEMINI_CDP_PORT": "9222"
+      }
+    }
+  }
+}

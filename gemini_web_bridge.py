@@ -101,54 +101,37 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── RPA 图片上传（pyautogui 物理点击 + 菜单 + 文件对话框）──
+            # ── 图片上传：复制到剪贴板 → Ctrl+V 粘贴到输入框 ──
             if image_path and os.path.isfile(image_path):
                 abs_path = os.path.abspath(image_path)
-                log("RPA upload:", abs_path)
+                log("Clipboard upload:", abs_path)
                 try:
-                    import pyautogui, pyperclip
-                    # 计算屏幕坐标的辅助函数
-                    def to_screen(pos):
-                        chrome_top = pos.get("oh",0) - pos.get("ih",0)
-                        return (pos["sx"] + pos["bx"], pos["sy"] + pos["by"] + (chrome_top if chrome_top > 0 else 40))
+                    # 1. PowerShell 将图片设置到系统剪贴板
+                    import subprocess
+                    ps_cmd = f'Set-Clipboard -Path "{abs_path}"'
+                    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=10)
+                    log("Image copied to clipboard")
                     
-                    # 1. 获取按钮坐标
-                    pos_info = await exec_js(300, (
+                    # 2. 聚焦输入框
+                    await exec_js(300, (
                         "(function(){"
-                        " var b=document.querySelector('button[aria-label=\"Upload and tools\"]');"
-                        " if(!b) return 'no-btn';"
-                        " var r=b.getBoundingClientRect();"
-                        " return JSON.stringify({bx:r.left+r.width/2,by:r.top+r.height/2,"
-                        "  sx:window.screenLeft||window.screenX||0,sy:window.screenTop||window.screenY||0,"
-                        "  iw:window.innerWidth,ih:window.innerHeight,ow:window.outerWidth,oh:window.outerHeight});"
+                        " var b=document.querySelector('.ql-editor');"
+                        " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
+                        " if(!b) return 'no-input';"
+                        " b.focus(); b.click();"
+                        " return 'focused';"
                         "})();"
                     ))
-                    pos = json.loads(pos_info.get("result",{}).get("result",{}).get("value","{}"))
-                    if not pos or pos.get("bx") is None: raise Exception("no upload button")
-                    
-                    # 2. pyautogui 点击 "Upload and tools" → 等待菜单 → 方向键导航
-                    sx, sy = to_screen(pos)
-                    log(f"Step1: click Upload btn at screen({sx:.0f},{sy:.0f})")
-                    pyautogui.moveTo(sx, sy, duration=0.2)
-                    pyautogui.click()
-                    await asyncio.sleep(1.5)
-                    
-                    # 尝试用方向键导航菜单（比位置猜测更可靠）
-                    pyautogui.press('down')  # 选第一个菜单项
-                    await asyncio.sleep(0.3)
-                    pyautogui.press('enter')  # 确认
-                    await asyncio.sleep(2.0)
-                    await asyncio.sleep(2.0)
-
-                    # 4. 文件对话框操作
-                    pyperclip.copy(abs_path)
-                    pyautogui.hotkey('ctrl','v')
                     await asyncio.sleep(0.5)
-                    pyautogui.press('enter')
-                    await asyncio.sleep(4.0)
-                    log("RPA upload completed")
+                    
+                    # 3. pyautogui 物理 Ctrl+V（真实键盘事件）
+                    import pyautogui
+                    pyautogui.hotkey('ctrl', 'v')
+                    await asyncio.sleep(3.0)
+                    log("Ctrl+V dispatched")
+                    
                 except Exception as e:
-                    log(f"RPA failed: {e}")
+                    log(f"Clipboard upload failed: {e}")
 
             # ── 注入 MutationObserver（简化版，阈值 2）──
             await exec_js(200, (

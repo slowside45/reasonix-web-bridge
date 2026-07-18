@@ -101,6 +101,37 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
+            # ── RPA 图片上传（原生文件对话框，绕过 isTrusted）──
+            if image_path and os.path.isfile(image_path):
+                abs_path = os.path.abspath(image_path)
+                log("RPA upload:", abs_path)
+                try:
+                    import pyautogui, pyperclip
+                    btn_info = await exec_js(300, (
+                        "(function(){"
+                        " var b=document.querySelector('button[aria-label=\"Upload and tools\"]');"
+                        " if(!b) return 'no-btn';"
+                        " var r=b.getBoundingClientRect();"
+                        " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});"
+                        "})();"
+                    ))
+                    btn = json.loads(btn_info.get("result",{}).get("result",{}).get("value","{}"))
+                    if not btn or btn.get("x") is None: raise Exception("no upload button")
+                    log(f"Clicking upload btn at ({btn['x']:.0f},{btn['y']:.0f})")
+                    await send_cdp(301, "Input.dispatchMouseEvent", {
+                        "type":"mousePressed","x":btn["x"],"y":btn["y"],"button":"left","clickCount":1})
+                    await send_cdp(302, "Input.dispatchMouseEvent", {
+                        "type":"mouseReleased","x":btn["x"],"y":btn["y"],"button":"left","clickCount":1})
+                    await asyncio.sleep(1.5)
+                    pyperclip.copy(abs_path)
+                    pyautogui.hotkey('ctrl','v')
+                    await asyncio.sleep(0.5)
+                    pyautogui.press('enter')
+                    await asyncio.sleep(3.0)
+                    log("RPA upload completed")
+                except Exception as e:
+                    log(f"RPA failed: {e}")
+
             # ── 注入 MutationObserver（简化版，阈值 2）──
             await exec_js(200, (
                 "(function(){"
@@ -130,65 +161,6 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 "  return (m.innerText||'').trim().substring(0,80);}));"
                 "'ok';"
             ))
-
-            # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
-            if image_path and os.path.isfile(image_path):
-                log("Uploading image via paste simulation:", image_path)
-                abs_path = os.path.abspath(image_path)
-
-                # 步骤1：用 JS 创建隐藏 file input，通过 objectId 注入文件（绕过 DOM 树刷新问题）
-                create_res = await exec_js(210, (
-                    "(function(){"
-                    " var inp=document.createElement('input');"
-                    " inp.type='file';"
-                    " inp.style.display='none';"
-                    " document.body.appendChild(inp);"
-                    " return inp;"  # returnByValue=false → 返回 objectId
-                    "})();"
-                ))
-                # exec_js 用了 returnByValue=True，所以返回的是 "[object HTMLInputElement]" 之类的字符串
-                # 需要用 send_cdp 直接调 Runtime.evaluate（returnByValue=false）来获取 objectId
-                obj_res = await send_cdp(211, "Runtime.evaluate", {
-                    "expression": (
-                        "(function(){"
-                        " var inp=document.createElement('input');"
-                        " inp.type='file';"
-                        " inp.style.display='none';"
-                        " document.body.appendChild(inp);"
-                        " return inp;"
-                        "})();"
-                    ),
-                    "returnByValue": False
-                })
-                obj_id = obj_res.get("result", {}).get("result", {}).get("objectId")
-                if obj_id:
-                    await send_cdp(212, "DOM.setFileInputFiles", {
-                        "objectId": obj_id,
-                        "files": [abs_path]
-                    })
-                    log("File injected via objectId, dispatching paste...")
-                    await exec_js(213, (
-                        "(function(){"
-                        " var all=document.querySelectorAll('input[type=\"file\"]');"
-                        " var fi=null;"
-                        " for(var i=0;i<all.length;i++){if(all[i].files&&all[i].files.length>0){fi=all[i];break;}}"
-                        " if(!fi) return 'no-files';"
-                        # 在 input 上触发 change（composed:true 穿透 Shadow DOM）
-                        " fi.dispatchEvent(new Event('change',{bubbles:true,cancelable:true,composed:true}));"
-                        # 父级也触发
-                        " var p=fi.parentElement;"
-                        " if(p){p.dispatchEvent(new Event('input',{bubbles:true,composed:true}));"
-                        "       p.dispatchEvent(new Event('change',{bubbles:true,composed:true}));}"
-                        # 尝试点击上传按钮
-                        " var btn=document.querySelector('button[aria-label*=\"上传\"], .image-upload-button');"
-                        " if(btn) btn.click();"
-                        " return 'upload-triggered';"
-                        "})();"
-                    ))
-                    log("Paste dispatched")
-                    await asyncio.sleep(3.0)
-                else:
-                    log("Cannot get objectId for file input")
 
             # ── 发送文本（无论是否传图）──
             log("Now injecting text...")

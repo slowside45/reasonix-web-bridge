@@ -147,6 +147,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         log(f"Clipboard may have failed: {result.stdout.strip()}")
                         raise Exception("Clipboard set failed")
                     log("Image in clipboard, sending Ctrl+V via pyautogui...")
+                    import pyautogui
                     pyautogui.hotkey('ctrl', 'v')
                     log("Ctrl+V sent, waiting for image to start uploading...")
                     # 等图片开始上传（预览出现、遮罩出现）

@@ -154,13 +154,14 @@ def main():
     print()
 
     # ── 1. 安装依赖 ──
-    print(yellow("[1/4] Installing websockets..."))
-    ok = run([PYTHON_EXE, "-m", "pip", "install", "websockets", "-q"], "pip install websockets")
-    if ok:
-        print(green("       websockets installed"))
-    else:
-        print(yellow("       Retrying with --user..."))
-        run([PYTHON_EXE, "-m", "pip", "install", "websockets", "--user", "-q"], "pip install --user")
+    print(yellow("[1/4] Installing websockets, pyautogui, pyperclip..."))
+    for pkg in ["websockets", "pyautogui", "pyperclip"]:
+        ok = run([PYTHON_EXE, "-m", "pip", "install", pkg, "-q"], f"pip install {pkg}")
+        if ok:
+            print(green(f"       {pkg} installed"))
+        else:
+            print(yellow(f"       Retrying {pkg} with --user..."))
+            run([PYTHON_EXE, "-m", "pip", "install", pkg, "--user", "-q"], f"pip install --user {pkg}")
     print()
 
     # ── 2. MCP 服务器脚本（仅当缺失时创建）──

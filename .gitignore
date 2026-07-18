@@ -8,5 +8,10 @@ dist/
 build/
 edge_debug.log
 .DS_Store
-_test_send.py
+# 临时测试文件
+_*.py
+_r.txt
+_d.txt
+# Rasonix 内部文件
 .reasonix/desktop-topic-*
+.reasonix/attachments/

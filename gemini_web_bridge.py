@@ -120,15 +120,6 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     await asyncio.sleep(1.0)
                     
                     # 1. 复制图片 + Ctrl+V
-                    old_count = await exec_js(303, (
-                        "(function(){"
-                        " return document.querySelectorAll('[class*=\"preview\"], [class*=\"upload\"], img[alt*=\"预览\"]').length;"
-                        "})();"
-                    ))
-                    try: old_n = int(old_count.get("result",{}).get("result",{}).get("value",0) or 0)
-                    except: old_n = 0
-                    log(f"Existing previews: {old_n}")
-                    
                     ps_cmd = (
                         f'Add-Type -AssemblyName System.Windows.Forms;'
                         f'Add-Type -AssemblyName System.Drawing;'
@@ -138,29 +129,29 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     )
                     subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=10)
                     log("Image in clipboard, sending Ctrl+V via pyautogui...")
-                    
-                    # pyautogui 物理 Ctrl+V（比 SendKeys 更可靠）
                     import pyautogui
                     pyautogui.hotkey('ctrl', 'v')
-                    log("Ctrl+V sent, waiting...")
+                    log("Ctrl+V sent, waiting for upload complete...")
                     
-                    # 等新预览出现（数量增加）
-                    for retry in range(12):
-                        await asyncio.sleep(1.0)
-                        new_count = await exec_js(304, (
-                            "(function(){"
-                            " return document.querySelectorAll('[class*=\"preview\"], [class*=\"upload\"], img[alt*=\"预览\"]').length;"
-                            "})();"
+                    log("Ctrl+V sent, waiting for upload...")
+                    # 简单可靠：等预览出现 → 固定等待上传完成
+                    preview_ok = False
+                    for retry in range(20):
+                        await asyncio.sleep(0.5)
+                        has_preview = await exec_js(304, (
+                            "!!document.querySelector('[class*=\"preview\"], [class*=\"thumbnail\"], [class*=\"upload\"] img');"
                         ))
-                        try: new_n = int(new_count.get("result",{}).get("result",{}).get("value",0) or 0)
-                        except: new_n = old_n
-                        if new_n > old_n:
-                            log(f"New preview detected! ({old_n}->{new_n})")
-                            # 等上传彻底完成
-                            await asyncio.sleep(5.0)
-                            break
+                        try:
+                            if has_preview.get("result",{}).get("result",{}).get("value"):
+                                preview_ok = True
+                                log(f"Preview appeared at {retry*0.5:.0f}s")
+                                break
+                        except: pass
+                    if preview_ok:
+                        await asyncio.sleep(8.0)  # 等上传完成
+                        log("Upload should be complete")
                     else:
-                        log(f"Preview count unchanged ({old_n})")
+                        log("No preview detected, proceeding anyway")
                     
                 except Exception as e:
                     log(f"Clipboard upload failed: {e}")

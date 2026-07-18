@@ -1,6 +1,6 @@
 # Reasonix Web Bridge
 
-将 Edge 浏览器中的 Gemini 网页端接入 Reasonix，实现「Gemini 出脑力、本地模型出体力」。支持纯文本和图片上传。Windows。
+将 Edge 浏览器中的 Gemini 网页端接入 Reasonix，实现「Gemini 出脑力、本地模型出体力」。支持纯文本和图片上传。支持Windows/MacOS。
 
 [![Python](https://img.shields.io/badge/python-3.7%2B-yellow)]()
 [![Browser](https://img.shields.io/badge/browser-Edge-green)]()

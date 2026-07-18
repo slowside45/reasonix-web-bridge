@@ -101,6 +101,25 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
+            # ── 注入 MutationObserver（一次连接只执行一次，无视 DOM 重建）──
+            await exec_js(200, (
+                "(function(){"
+                " if(window.__GEMINI_OBSERVER) return 'already';"
+                " window.__GEMINI_LAST_RESP='';"
+                " var observer=new MutationObserver(function(){"
+                "  var all=document.querySelectorAll('message-content');"
+                "  if(all.length>0){"
+                "   var t=(all[all.length-1].innerText||'').trim();"
+                "   if(t.length>20) window.__GEMINI_LAST_RESP=t;"
+                "  }"
+                " });"
+                " observer.observe(document.body,{childList:true,subtree:true,characterData:true});"
+                " window.__GEMINI_OBSERVER=observer;"
+                " return 'observer-installed';"
+                "})();"
+            ))
+            log("MutationObserver installed")
+
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
                 log("Uploading image via paste simulation:", image_path)
@@ -235,23 +254,8 @@ async def ask_gemini_web(prompt_text, image_path=None):
             await exec_js(104, js_click)
             log("Injected, waiting for reply...")
 
-            # 回复检测：三态 (PROCESSING/NOT_READY/WAIT) + 分级等待
-            js_get = (
-                "(function(){"
-                " var all=document.querySelectorAll('message-content');"
-                " if(all.length===0){"
-                # paste 后 DOM 清空 — 检查是否在处理中
-                "  var busy=document.querySelector('[aria-busy=\"true\"], mat-progress-bar, .loading');"
-                "  return busy?'PROCESSING':'NOT_READY';"
-                " }"
-                " for(var i=all.length-1;i>=0;i--){"
-                "  var t=(all[i].innerText||all[i].textContent||'').trim();"
-                "  if(t.length<10) continue;"
-                "  if(t.length>50) return t;"
-                " }"
-                " return 'WAIT';"
-                "})();"
-            )
+            # 回复检测：读 MutationObserver 缓存（无视 DOM 重建）
+            js_get = "(function(){return window.__GEMINI_LAST_RESP||'WAIT';})();"
             sl=0; st=0; ft=""; stale=0; await asyncio.sleep(3.0)
             while True:
                 try:
@@ -263,18 +267,12 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     if stale > 10: break
                     await asyncio.sleep(1.0)
                     continue
-                if ft=="PROCESSING":
-                    # 图片处理中，高频检查
-                    stale = 0
-                    await asyncio.sleep(0.5)
-                    continue
-                if ft=="NOT_READY" or ft=="WAIT" or not ft:
+                if ft=="WAIT" or not ft:
                     stale += 1
                     if stale > 90:
                         log("Timeout waiting for reply")
                         return "ERROR: Gemini did not respond within 90 seconds"
-                    # NOT_READY 等更久（DOM 重建中）
-                    await asyncio.sleep(2.0 if ft=="NOT_READY" else 0.5)
+                    await asyncio.sleep(1.0)
                     continue
                 stale = 0
                 if len(ft)==sl and len(ft)>0: st+=1

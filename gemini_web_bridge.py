@@ -121,118 +121,61 @@ async def ask_gemini_web(prompt_text, image_path=None):
             log("MutationObserver installed")
 
             # ── 每次发送前清空上次缓存 ──
-            await exec_js(201, "window.__GEMINI_LAST_RESP='';'cleared';")
+            await exec_js(201, "window.__GEMINI_LAST_RESP='';'ok';")
 
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
                 log("Uploading image via paste simulation:", image_path)
                 abs_path = os.path.abspath(image_path)
 
-                # 步骤1：启用 DOM，找到 Gemini 页面已有的 file input
-                await send_cdp(201, "DOM.enable")
-                doc = await send_cdp(202, "DOM.getDocument", {"depth": -1})
-                root_id = doc.get("result", {}).get("root", {}).get("nodeId", 0)
-                if not root_id:
-                    log("DOM.getDocument failed, falling back to hidden input")
-                else:
-                    # 查找 Gemini 原生的图片上传 input
-                    qr = await send_cdp(203, "DOM.querySelector", {
-                        "nodeId": root_id,
-                        "selector": "input[type='file']"
+                # 步骤1：用 JS 创建隐藏 file input，通过 objectId 注入文件（绕过 DOM 树刷新问题）
+                create_res = await exec_js(210, (
+                    "(function(){"
+                    " var inp=document.createElement('input');"
+                    " inp.type='file';"
+                    " inp.style.display='none';"
+                    " document.body.appendChild(inp);"
+                    " return inp;"  # returnByValue=false → 返回 objectId
+                    "})();"
+                ))
+                # exec_js 用了 returnByValue=True，所以返回的是 "[object HTMLInputElement]" 之类的字符串
+                # 需要用 send_cdp 直接调 Runtime.evaluate（returnByValue=false）来获取 objectId
+                obj_res = await send_cdp(211, "Runtime.evaluate", {
+                    "expression": (
+                        "(function(){"
+                        " var inp=document.createElement('input');"
+                        " inp.type='file';"
+                        " inp.style.display='none';"
+                        " document.body.appendChild(inp);"
+                        " return inp;"
+                        "})();"
+                    ),
+                    "returnByValue": False
+                })
+                obj_id = obj_res.get("result", {}).get("result", {}).get("objectId")
+                if obj_id:
+                    await send_cdp(212, "DOM.setFileInputFiles", {
+                        "objectId": obj_id,
+                        "files": [abs_path]
                     })
-                    file_node_id = qr.get("result", {}).get("nodeId", 0)
-
-                    # 如果找不到原生 input，创建隐藏 input 兜底
-                    if not file_node_id:
-                        log("No native file input, creating hidden input")
-                        await exec_js(204, (
-                            "(function(){"
-                            " var inp=document.createElement('input');"
-                            " inp.id='__gemini_fallback_upload';"
-                            " inp.type='file';"
-                            " inp.style.display='none';"
-                            " document.body.appendChild(inp);"
-                            " return inp.id;"
-                            "})();"
-                        ))
-                        qr2 = await send_cdp(205, "DOM.querySelector", {
-                            "nodeId": root_id,
-                            "selector": "#__gemini_fallback_upload"
-                        })
-                        file_node_id = qr2.get("result", {}).get("nodeId", 0)
-
-                    if file_node_id:
-                        # 步骤2：注入文件到 input
-                        await send_cdp(206, "DOM.setFileInputFiles", {
-                            "nodeId": file_node_id,
-                            "files": [abs_path]
-                        })
-                        log("File injected into input, dispatching paste event...")
-
-                        # 步骤3：通过 DataTransfer + ClipboardEvent 模拟 Ctrl+V 粘贴
-                        paste_js = (
-                            "(function(){"
-                            " var fi=document.querySelector('input[type=\"file\"]');"
-                            " if(!fi||!fi.files||fi.files.length===0) return 'no-files';"
-                            " var dt=new DataTransfer();"
-                            " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
-                            " var tb=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"]');"
-                            " if(!tb) return 'no-textbox';"
-                            " tb.focus();"
-                            " var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});"
-                            " tb.dispatchEvent(pe);"
-                            " return 'paste-ok files='+fi.files.length;"
-                            "})();"
-                        )
-                        await exec_js(207, paste_js)
-                        log("Paste event dispatched")
-                        await asyncio.sleep(3.0)
-                    else:
-                        # 创建隐藏 input 兜底 — 需要刷新 DOM
-                        log("No native file input, creating hidden input")
-                        await exec_js(204, (
-                            "(function(){"
-                            " var inp=document.createElement('input');"
-                            " inp.id='__gemini_fallback_upload';"
-                            " inp.type='file';"
-                            " inp.style.display='none';"
-                            " document.body.appendChild(inp);"
-                            " return inp.id;"
-                            "})();"
-                        ))
-                        # 重新获取 DOM 树
-                        doc2 = await send_cdp(205, "DOM.getDocument", {"depth": -1})
-                        root_id2 = doc2.get("result", {}).get("root", {}).get("nodeId", 0)
-                        if root_id2:
-                            qr2 = await send_cdp(206, "DOM.querySelector", {
-                                "nodeId": root_id2,
-                                "selector": "#__gemini_fallback_upload"
-                            })
-                            file_node_id = qr2.get("result", {}).get("nodeId", 0)
-                        if file_node_id:
-                            await send_cdp(207, "DOM.setFileInputFiles", {
-                                "nodeId": file_node_id,
-                                "files": [abs_path]
-                            })
-                            # 触发 change + paste
-                            await exec_js(208, (
-                                "(function(){"
-                                " var fi=document.getElementById('__gemini_fallback_upload');"
-                                " if(!fi||!fi.files||fi.files.length===0) return 'no-files';"
-                                " var dt=new DataTransfer();"
-                                " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
-                                " var tb=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"]');"
-                                " if(!tb) return 'no-textbox';"
-                                " tb.focus();"
-                                " var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});"
-                                " tb.dispatchEvent(pe);"
-                                " return 'paste-ok fallback';"
-                                "})();"
-                            ))
-                            log("Fallback paste dispatched")
-                            await asyncio.sleep(3.0)
-                        else:
-                            log("Cannot find or create file input — image upload skipped")
+                    log("File injected via objectId, dispatching paste...")
+                    await exec_js(213, (
+                        "(function(){"
+                        " var fi=document.querySelector('input[type=\"file\"]:not([accept])');"
+                        " if(!fi||!fi.files||fi.files.length===0) return 'no-files';"
+                        " var dt=new DataTransfer();"
+                        " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
+                        " var tb=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"]');"
+                        " if(!tb) return 'no-textbox';"
+                        " tb.focus();"
+                        " tb.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt}));"
+                        " return 'paste-ok';"
+                        "})();"
+                    ))
+                    log("Paste dispatched")
+                    await asyncio.sleep(3.0)
+                else:
+                    log("Cannot get objectId for file input")
 
             # ── 发送文本（无论是否传图）──
             log("Now injecting text...")
@@ -257,8 +200,20 @@ async def ask_gemini_web(prompt_text, image_path=None):
             await exec_js(104, js_click)
             log("Injected, waiting for reply...")
 
-            # 回复检测：读 MutationObserver 缓存（无视 DOM 重建）
-            js_get = "(function(){return window.__GEMINI_LAST_RESP||'WAIT';})();"
+            # 回复检测：Observer 缓存优先，兜底直接扫描
+            js_get = (
+                "(function(){"
+                " var c=window.__GEMINI_LAST_RESP;"
+                " if(c&&c.length>10) return c;"
+                " var all=document.querySelectorAll('message-content');"
+                " if(all.length===0) return 'WAIT';"
+                " for(var i=all.length-1;i>=0;i--){"
+                "  var t=(all[i].innerText||all[i].textContent||'').trim();"
+                "  if(t.length>10) return t;"
+                " }"
+                " return 'WAIT';"
+                "})();"
+            )
             sl=0; st=0; ft=""; stale=0; await asyncio.sleep(3.0)
             while True:
                 try:

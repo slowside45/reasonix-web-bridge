@@ -230,9 +230,9 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 "  var busy=document.querySelector('[aria-busy=\"true\"], mat-progress-bar');"
                 "  return busy?'PROCESSING':'WAIT';"
                 " }"
-                # 只扫描新消息（count > sent_count）
+                # 只扫描新消息（至少 +2: 跳过用户消息，等模型回复）
                 " var sent=window.__GEMINI_SENT_COUNT||0;"
-                " if(all.length<=sent) return 'WAIT';"
+                " if(all.length<=sent+1) return 'WAIT';"
                 " for(var i=all.length-1;i>=0;i--){"
                 "  var t=(all[i].innerText||all[i].textContent||'').trim();"
                 "  if(t.length>10) return t;"

@@ -107,22 +107,29 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 log("RPA upload:", abs_path)
                 try:
                     import pyautogui, pyperclip
-                    # 1. 获取按钮在视口中的坐标 + 窗口在屏幕上的偏移
+                    # 1. 获取按钮视口坐标 + 窗口在屏幕上的精确位置
                     pos_info = await exec_js(300, (
                         "(function(){"
                         " var b=document.querySelector('button[aria-label=\"Upload and tools\"]');"
                         " if(!b) return 'no-btn';"
                         " var r=b.getBoundingClientRect();"
-                        " return JSON.stringify({bx:r.left+r.width/2,by:r.top+r.height/2,"
-                        "  ow:window.outerWidth- window.innerWidth,oh:window.outerHeight-window.innerHeight});"
+                        " return JSON.stringify({"
+                        "  bx:r.left+r.width/2, by:r.top+r.height/2,"
+                        "  sx:window.screenLeft||window.screenX||0,"
+                        "  sy:window.screenTop||window.screenY||0,"
+                        "  iw:window.innerWidth, ih:window.innerHeight,"
+                        "  ow:window.outerWidth, oh:window.outerHeight"
+                        " });"
                         "})();"
                     ))
                     pos = json.loads(pos_info.get("result",{}).get("result",{}).get("value","{}"))
                     if not pos or pos.get("bx") is None: raise Exception("no upload button")
-                    # 屏幕坐标 = 视口坐标 + 窗口边框偏移
-                    sx = pos["bx"] + (pos.get("ow", 0) or 0)
-                    sy = pos["by"] + (pos.get("oh", 0) or 40)  # 标题栏 ~40px
-                    log(f"RPA click at screen ({sx:.0f},{sy:.0f})")
+                    # 屏幕坐标 = window屏幕左上角 + 按钮视口坐标 + 窗口chrome偏移
+                    # outerHeight-innerHeight 包含标题栏+边框
+                    chrome_top = pos.get("oh",0) - pos.get("ih",0)
+                    sx = pos["sx"] + pos["bx"]
+                    sy = pos["sy"] + pos["by"] + (chrome_top if chrome_top > 0 else 40)
+                    log(f"RPA click: viewport({pos['bx']:.0f},{pos['by']:.0f}) screen({sx:.0f},{sy:.0f})")
                     # 2. pyautogui 物理点击（真实鼠标，isTrusted=true）
                     pyautogui.moveTo(sx, sy, duration=0.2)
                     pyautogui.click()

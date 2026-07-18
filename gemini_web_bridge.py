@@ -139,9 +139,10 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     log("Image in clipboard, sending Ctrl+V via pyautogui...")
                     import pyautogui
                     pyautogui.hotkey('ctrl', 'v')
-                    log("Ctrl+V sent, waiting for upload...")
-                    # 先等预览出现（确认粘贴成功）
-                    await asyncio.sleep(1.0)
+                    log("Ctrl+V sent, waiting for image to start uploading...")
+                    # 等图片开始上传（预览出现、遮罩出现）
+                    await asyncio.sleep(3.0)
+                    
                     # 注入文字（追加模式，不清除图片预览）
                     await exec_js(302, (
                         "(function(){"
@@ -149,7 +150,6 @@ async def ask_gemini_web(prompt_text, image_path=None):
                         " if(!b) b=document.querySelector('div[role=\"textbox\"][contenteditable=\"true\"]');"
                         " if(!b) return 'no-input';"
                         " b.focus();"
-                        # 光标移到末尾
                         " var sel=window.getSelection();"
                         " var r=document.createRange();"
                         " r.selectNodeContents(b); r.collapse(false);"
@@ -159,26 +159,28 @@ async def ask_gemini_web(prompt_text, image_path=None):
                     ))
                     await asyncio.sleep(0.1)
                     await send_cdp(103, "Input.insertText", {"text": prompt_text})
-                    log("Text injected, waiting for Send button to enable...")
+                    log("Text injected, waiting for upload to complete...")
                     
-                    # 轮询：等 "Send message" 按钮出现且 enabled
+                    # 轮询：等 Send 按钮 enabled 且上传完成（circle-overlay 消失或按钮不再 disabled）
                     for retry in range(60):
                         await asyncio.sleep(0.5)
                         status = await exec_js(304, (
                             "(function(){"
                             " var btn=document.querySelector('button[aria-label=\"Send message\"]');"
-                            " return JSON.stringify({disabled:btn?btn.disabled:null,visible:btn?btn.offsetParent!==null:false});"
+                            " var spinner=document.querySelector('.circle-overlay, [class*=\"spinner\"], [class*=\"loading\"]');"
+                            " return JSON.stringify({disabled:btn?btn.disabled:null,visible:btn?btn.offsetParent!==null:false,spinner:!!spinner});"
                             "})();"
                         ))
                         try:
                             st = json.loads(status.get("result",{}).get("result",{}).get("value","{}"))
                         except:
                             st = {}
-                        if st.get("disabled") is False and st.get("visible"):
-                            log(f"Send button ready at {retry*0.5:.0f}s")
+                        # 上传完成条件：按钮可见 && 不禁用 && 已等至少3秒（给上传时间）
+                        if st.get("visible") and st.get("disabled") is False and retry >= 6:
+                            log(f"Upload complete at {retry*0.5:.0f}s")
                             break
-                    else:
-                        log("Send button wait timeout, clicking anyway")
+                        if retry % 10 == 0:
+                            log(f"  waiting {retry*0.5:.0f}s... disabled={st.get('disabled')} visible={st.get('visible')}")
                     
                     # 点击发送（跳过下面的文本注入和发送，直接跳到回复检测）
                     js_click_code = "(function(){var b=document.querySelector('button[aria-label=\"Send message\"]');if(b){b.click();return true;}return false;})();"

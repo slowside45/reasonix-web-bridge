@@ -101,21 +101,6 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── 基准气泡数（在图片操作之前获取，避免 paste 清空 DOM）──
-            base_count = 0; last_known_id = "none"
-            js_base = ("(function(){"
-                       " var a=document.querySelectorAll('message-content');"
-                       " return JSON.stringify({count:a.length, lastId:a.length?a[a.length-1].id:'none'});"
-                       "})();")
-            base_res = await exec_js(101, js_base)
-            try:
-                base_info = json.loads(base_res.get("result",{}).get("result",{}).get("value","{}"))
-            except:
-                base_info = {"count": 0, "lastId": "none"}
-            base_count = base_info.get("count", 0)
-            last_known_id = base_info.get("lastId", "none")
-            log(f"Base: count={base_count}, lastId={last_known_id}")
-
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
                 log("Uploading image via paste simulation:", image_path)
@@ -230,6 +215,21 @@ async def ask_gemini_web(prompt_text, image_path=None):
             # ── 发送文本（无论是否传图）──
             log("Now injecting text...")
 
+            # ── 基准气泡数（paste 后 DOM 可能短暂清空，等待恢复）──
+            base_count = 0
+            for retry in range(15):
+                js_base = "document.querySelectorAll('message-content').length;"
+                base_res = await exec_js(101, js_base)
+                try:
+                    base_count = int(base_res.get("result",{}).get("result",{}).get("value",0) or 0)
+                except:
+                    base_count = 0
+                if base_count > 0:
+                    break
+                if retry < 14:
+                    await asyncio.sleep(1.0)
+            log(f"Base: count={base_count}")
+
             # 文本注入：使用 CDP Input.insertText（Quill 只接受真实输入事件）
             log("Injecting text via Input.insertText...")
             # 先聚焦输入框
@@ -250,13 +250,15 @@ async def ask_gemini_web(prompt_text, image_path=None):
             await exec_js(104, js_click)
             log("Injected, waiting for reply...")
 
-            # ── 回复检测：等新消息出现，要求长度 > 50 过滤短用户消息 ──
+            # 回复检测：从后往前扫，取第一条长度 > 30 的新消息
             js_get = ("(function(){"
                       " var base=" + str(base_count) + ";"
                       " var all=document.querySelectorAll('message-content');"
                       " if(all.length>base){"
-                      "  var t=(all[all.length-1].innerText||all[all.length-1].textContent||'').trim();"
-                      "  if(t.length>50) return t;"  # 模型回复通常 > 50 字符
+                      "  for(var i=all.length-1;i>=0;i--){"
+                      "   var t=(all[i].innerText||all[i].textContent||'').trim();"
+                      "   if(t.length>30) return t;"
+                      "  }"
                       " }"
                       " return 'WAIT';"
                       "})();")
@@ -264,7 +266,7 @@ async def ask_gemini_web(prompt_text, image_path=None):
             while True:
                 await asyncio.sleep(1.0)
                 try:
-                    ro = await exec_js(104, js_get)
+                    ro = await exec_js(105, js_get)
                     ft = str(ro.get("result",{}).get("result",{}).get("value","") or "")
                 except Exception as e:
                     log("JS eval error:", e)

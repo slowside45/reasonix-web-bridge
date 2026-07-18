@@ -3,7 +3,7 @@ name: gemini-mode
 description: 自动将每次提问转发给网页 Gemini，根据回答执行本地操作；自动安装依赖、启动浏览器并提示登录
 ---
 
-## Gemini Augmented Mode (v2.2 — 自举版)
+## Gemini Augmented Mode (v3.1 — 冻结版)
 
 收到用户消息后，**自动完成以下全部步骤，无需用户干预**。
 
@@ -11,68 +11,37 @@ description: 自动将每次提问转发给网页 Gemini，根据回答执行本
 
 ### 步骤 A：环境自检 & 自动修复
 
-**每次执行 /gemini-mode 时，先静默检查：**
-
-| 检查项 | 检查方式 | 缺失时处理 |
-|--------|---------|-----------|
-| `websockets` 是否安装 | `python -c "import websockets"` | `pip install websockets` |
-| `gemini_web_bridge.py` 存在 | 检查文件 | 异常：需 clone 完整仓库 |
-| `.mcp.json` 含 gemini-web-bridge | 检查文件内容 | 运行 `python install.py` |
-
-> 环境就绪后直接进入步骤 B，后续轮次不再重复检查依赖。
+| 检查项 | 缺失时处理 |
+|--------|-----------|
+| `websockets` | `pip install websockets` |
+| `gemini_web_bridge.py` | clone 完整仓库 |
+| `.mcp.json` 含 gemini-web-bridge | `python install.py` |
 
 ---
 
 ### 步骤 B：确保浏览器就绪
 
-**优先级：MCP 工具 > Python 直调 > bash 启动**
-
-#### B1. 检查 CDP 状态
-
-```python
-# Python 直调（MCP 不可用时的 fallback）
-import urllib.request, json
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=3).read())
-# 遍历 tabs，查找 url 含 "gemini.google.com" 的标签页
-# 检查标题不含 "Sign in" / "登录" / "Google 账号" → 已登录
-```
-
-#### B2. 启动浏览器（CDP 无响应时）
-
-**关键参数**：Edge 150+ 必须 `--disable-background-mode`，否则进程秒退。
-
-```powershell
-# Windows — bash 后台启动
-$edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-# 或 "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-$userDir = "$env:USERPROFILE\.gemini-mcp-browser-profile"
-& $edgePath --remote-debugging-port=9222 --user-data-dir="$userDir" `
-    --no-first-run --no-default-browser-check --disable-background-mode `
-    https://gemini.google.com
-```
-
-启动后等待 5-8 秒，重新执行 B1 验证 CDP 就绪。
-
-#### B3. 登录检查
-
-Gemini 标签页标题含 `Sign in` / `登录` / `Google 账号` → 提示用户手动登录浏览器，等待确认后继续。
+1. 检查 CDP `http://127.0.0.1:9222/json`，找到 `gemini.google.com` 标签页
+2. CDP 无响应 → 启动 Edge（**必须** `--disable-background-mode`）：
+   ```powershell
+   $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+   & $edgePath --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\.gemini-mcp-browser-profile" --no-first-run --no-default-browser-check --disable-background-mode https://gemini.google.com
+   ```
+3. 登录检查：标题含 `Sign in` / `登录` → 提示用户
 
 ---
 
 ### 步骤 C：发送消息到 Gemini
 
-**优先级：MCP `ask_gemini_web` > Python 直调脚本**
-
-MCP 不可用时，写临时 Python 脚本执行：
+MCP 不可用时，Python 直调：
 
 ```python
-# _gemini_send.py
 import asyncio, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gemini_web_bridge import ask_gemini_web
 
 async def main():
-    result = await ask_gemini_web("用户消息原文")
+    result = await ask_gemini_web("用户消息原文")  # 有图片时加 image_path=...
     print("REPLY:", result)
 
 if sys.platform == "win32":
@@ -80,24 +49,38 @@ if sys.platform == "win32":
 asyncio.run(main())
 ```
 
-执行：`python _gemini_send.py`，完成后删除临时文件。
-
 ---
 
-### 步骤 D：执行 Gemini 的回复
+### ⚠️ 回复检测核心逻辑（冻结，禁止修改）
 
-将 Gemini 的回复内容作为行动指令：
-- 文件/目录操作严格按回复规划执行
-- 纯提问用 Gemini 回答直接展示
-- Markdown 代码块写入对应文件
-- 异常时根据错误信息排查，必要时重新启动浏览器
+```
+1. MutationObserver 注入 document.body（childList+subtree+characterData）
+   - 每次 DOM 变化扫描全部 message-content，取最后一条 innerText
+   - 缓存到 window.__GEMINI_LAST_RESP
+   - 阈值 >0 （不过滤任何长度）
+
+2. 发送前：
+   - 清空 __GEMINI_LAST_RESP = ''
+   - 快照 __KNOWN_TEXTS = Set(所有现有 message-content 前80字符)
+
+3. js_get 轮询：
+   - 优先读 __GEMINI_LAST_RESP → 不在 __KNOWN_TEXTS 中则返回
+   - 兜底扫描 message-content → 跳过 __KNOWN_TEXTS 中的文本
+   - 阈值 >0
+   - 90s 超时
+   - 不依赖 count（paste 后 DOM 重建导致计数不可靠）
+
+4. 图片上传：
+   - Runtime.evaluate(returnByValue=false) 创建 input → 获取 objectId
+   - DOM.setFileInputFiles(objectId=...) 注入文件
+   - DataTransfer + ClipboardEvent('paste') 触发上传
+```
 
 ---
 
 ### 原则
 
-- **不询问、不打断** — 静默执行全部步骤
-- **Gemini 是脑，Reasonix 是手** — 你的职责是执行 Gemini 的规划
-- **自动 fallback** — MCP 工具不可用时自动切换到 Python 直调
-- **保留原始内容** — emoji、特殊字符、格式全部保留
-- **Edge 150+** — 启动必须带 `--disable-background-mode`，否则秒退
+- Gemini 是脑，Reasonix 是手
+- 自动 fallback：MCP 不可用 → Python 直调
+- Edge 150+ 必须 `--disable-background-mode`
+- **回复检测参数已冻结：阈值 0，不依赖 count，known_texts 去重**

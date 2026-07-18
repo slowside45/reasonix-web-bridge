@@ -82,7 +82,6 @@ def check_gemini_ready():
     return False, "No Gemini tab"
 
 async def ask_gemini_web(prompt_text, image_path=None):
-    global _known_ids
     ws_url = get_gemini_ws()
     if not ws_url:
         hint = BROWSER["display"] if BROWSER else "Chrome/Edge"
@@ -280,9 +279,7 @@ def setup_browser():
     except Exception as e: lines.append("FAIL "+str(e))
     return "\n".join(lines)
 
-SN="gemini-web-bridge"; SV="2.2.0"
-# 跨调用已知消息 ID 集合（Python 端维护，防止竞态）
-_known_ids = set()
+SN="gemini-web-bridge"; SV="3.1.0"  # 冻结版 — 回复检测逻辑勿改
 TOOLS=[{"name":"ask_gemini_web","description":"Send prompt (and optionally an image) to Gemini in Chrome/Edge. Set image_path to a local image file for vision analysis. Returns full reply.","inputSchema":{"type":"object","properties":{"prompt":{"type":"string","description":"The prompt to send"},"image_path":{"type":"string","description":"Optional: absolute path to an image file for Gemini vision analysis"}},"required":["prompt"]}},{"name":"setup_gemini_browser","description":"Auto-detect and launch Chrome/Edge with debug port.","inputSchema":{"type":"object","properties":{},"required":[]}},{"name":"check_gemini_status","description":"Check browser+Gemini status.","inputSchema":{"type":"object","properties":{},"required":[]}}]
 def mr(i,r): return json.dumps({"jsonrpc":"2.0","id":i,"result":r},ensure_ascii=False)
 def me(i,c,m): return json.dumps({"jsonrpc":"2.0","id":i,"error":{"code":c,"message":m}},ensure_ascii=False)

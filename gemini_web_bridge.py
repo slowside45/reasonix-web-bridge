@@ -101,73 +101,110 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js})
 
-            # ── 多模态：通过隐藏 input 注入文件 ──
+            # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
-                log("Uploading:", image_path)
+                log("Uploading image via paste simulation:", image_path)
                 abs_path = os.path.abspath(image_path)
 
-                # 用 JS 创建一个隐藏的 file input（如果不存在），插入到 body
-                create_res = await send_cdp(201, "Runtime.evaluate", {
-                    "expression": (
-                        "(function(){"
-                        " var inp=document.getElementById('__gemini_file_upload');"
-                        " if(!inp){"
-                        "   inp=document.createElement('input');"
-                        "   inp.id='__gemini_file_upload';"
-                        "   inp.type='file';"
-                        "   inp.style.display='none';"
-                        "   document.body.appendChild(inp);"
-                        " }"
-                        " return inp.id;"
-                        "})()"
-                    ),
-                    "returnByValue": False
-                })
-                obj_id = create_res.get("result", {}).get("result", {}).get("objectId")
-                if obj_id:
-                    await send_cdp(202, "DOM.setFileInputFiles", {
-                        "objectId": obj_id,
-                        "files": [abs_path]
-                    })
-                    log("File injected")
-                    # 触发 change 事件
-                    await exec_js(203, (
-                        "(function(){"
-                        " var inp=document.getElementById('__gemini_file_upload');"
-                        " if(inp) inp.dispatchEvent(new Event('change',{bubbles:true}));"
-                        " return inp ? 'ok' : 'no-inp';"
-                        "})();"
-                    ))
+                # 步骤1：启用 DOM，找到 Gemini 页面已有的 file input
+                await send_cdp(201, "DOM.enable")
+                doc = await send_cdp(202, "DOM.getDocument", {"depth": -1})
+                root_id = doc.get("result", {}).get("root", {}).get("nodeId", 0)
+                if not root_id:
+                    log("DOM.getDocument failed, falling back to hidden input")
                 else:
-                    log("Could not create hidden input")
-                await asyncio.sleep(2.0)
+                    # 查找 Gemini 原生的图片上传 input
+                    qr = await send_cdp(203, "DOM.querySelector", {
+                        "nodeId": root_id,
+                        "selector": "input[type='file']"
+                    })
+                    file_node_id = qr.get("result", {}).get("nodeId", 0)
 
-            # ── 发送文本（无论是否传图，都聚焦输入框并填入文本）──
-            # 注意：文本注入必须在图片操作之后进行，且必须重新查找输入框
+                    # 如果找不到原生 input，创建隐藏 input 兜底
+                    if not file_node_id:
+                        log("No native file input, creating hidden input")
+                        await exec_js(204, (
+                            "(function(){"
+                            " var inp=document.createElement('input');"
+                            " inp.id='__gemini_fallback_upload';"
+                            " inp.type='file';"
+                            " inp.style.display='none';"
+                            " document.body.appendChild(inp);"
+                            " return inp.id;"
+                            "})();"
+                        ))
+                        qr2 = await send_cdp(205, "DOM.querySelector", {
+                            "nodeId": root_id,
+                            "selector": "#__gemini_fallback_upload"
+                        })
+                        file_node_id = qr2.get("result", {}).get("nodeId", 0)
+
+                    if file_node_id:
+                        # 步骤2：注入文件到 input
+                        await send_cdp(206, "DOM.setFileInputFiles", {
+                            "nodeId": file_node_id,
+                            "files": [abs_path]
+                        })
+                        log("File injected into input, dispatching paste event...")
+
+                        # 步骤3：通过 DataTransfer + ClipboardEvent 模拟 Ctrl+V 粘贴（同步执行，避免 Promise 问题）
+                        paste_js = (
+                            "(function(){"
+                            " var fi=document.querySelector('input[type=\"file\"]');"
+                            " if(!fi||!fi.files||fi.files.length===0) return 'no-files';"
+                            " var dt=new DataTransfer();"
+                            " for(var i=0;i<fi.files.length;i++){dt.items.add(fi.files[i]);}"
+                            " var tb=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"]');"
+                            " if(!tb) return 'no-textbox';"
+                            " tb.focus();"
+                            " var pe=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});"
+                            " tb.dispatchEvent(pe);"
+                            " return 'paste-ok files='+fi.files.length;"
+                            "})();"
+                        )
+                        await exec_js(207, paste_js)
+                        log("Paste event dispatched")
+                        # 等待 Gemini 处理上传（图片预览出现）
+                        await asyncio.sleep(3.0)
+                    else:
+                        log("Cannot find or create file input — image upload skipped")
+
+            # ── 发送文本（无论是否传图）──
             log("Now injecting text...")
 
-            # ── 基准气泡数 ──
-            js_count = "(function(){var s=['message-content','.message-content','gmat-rich-text','.model-response','[data-message-author-role=\"model\"]'];for(var i=0;i<s.length;i++){var e=document.querySelectorAll(s[i]);if(e.length>0)return e.length;}return 0;})();"
+            # ── 基准气泡数（message-content 是 Gemini 自定义元素，最可靠）──
+            js_count = "(function(){return document.querySelectorAll('message-content').length;})();"
             old_res = await exec_js(101, js_count)
             old_count = old_res.get("result",{}).get("result",{}).get("value",0) or 0
             log("Base bubbles:", old_count)
-            escaped = prompt_text.replace("\\","\\\\").replace("`","\\`").replace("\n","\\n").replace("\r","\\r")
-            js_input = ("(function(){var b=document.querySelector('div[role=\"textbox\"],textarea,.rich-textarea,[contenteditable=\"true\"]');if(!b)return false;b.focus();"
-                        f"if(b.tagName==='TEXTAREA'||b.tagName==='INPUT'){{b.value=`{escaped}`;}}"
-                        f"else{{b.innerText=`{escaped}`;}}"
-                        "b.dispatchEvent(new Event('input',{bubbles:true,composed:true}));return true;})();")
+
+            # 文本注入：需要精确定位 rich-textarea 内的 contenteditable div
+            escaped = prompt_text.replace("\\","\\\\").replace("`","\\`").replace("$","\\$")
+            js_input = (
+                "(function(){"
+                # rich-textarea 包含 ql-editor contenteditable div；也兼容 div[role=\"textbox\"]
+                " var b=document.querySelector('rich-textarea div[contenteditable=\"true\"], div[role=\"textbox\"][contenteditable=\"true\"], [contenteditable=\"true\"]');"
+                " if(!b) return 'no-input';"
+                " b.focus();"
+                " b.innerHTML='';"  # 清空避免残留
+                f" var ok=document.execCommand('insertText',false,`{escaped}`);"
+                " if(!ok) { b.innerText=`" + escaped + "`; b.dispatchEvent(new Event('input',{bubbles:true,composed:true})); }"
+                " return JSON.stringify({ok:ok, tag:b.tagName, text_len:(b.innerText||'').length});"
+                "})();"
+            )
             await exec_js(102, js_input)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.3)
             js_click = "(function(){var b=document.querySelector('button[aria-label*=\"Send\"],button[aria-label*=\"发送\"],.send-button');if(b){b.click();return true;}return false;})();"
             await exec_js(103, js_click)
             log("Injected, waiting...")
-            js_get = ("(function(){var s=['message-content','.message-content','gmat-rich-text','.model-response','[data-message-author-role=\"model\"]'];var base="+str(old_count)+
-                      ";for(var i=0;i<s.length;i++){var e=document.querySelectorAll(s[i]);if(e.length>base){var t=e[e.length-1].innerText||e[e.length-1].textContent;if(t&&t.trim().length>0)return t.trim();}}return 'WAIT';})();")
+            # 回复检测也改用 message-content
+            js_get = ("(function(){var base="+str(old_count)+
+                      ";var e=document.querySelectorAll('message-content');if(e.length>base){var t=e[e.length-1].innerText||e[e.length-1].textContent;if(t&&t.trim().length>0)return t.trim();}return 'WAIT';})();")
             sl=0; st=0; ft=""; await asyncio.sleep(3.0)
             while True:
                 await asyncio.sleep(0.5)
                 ro = await exec_js(104, js_get)
-                ft = ro.get("result",{}).get("result",{}).get("value","") or ""
+                ft = str(ro.get("result",{}).get("result",{}).get("value","") or "")
                 if ft=="WAIT" or not ft: continue
                 if len(ft)==sl and len(ft)>0: st+=1
                 else: sl=len(ft); st=0

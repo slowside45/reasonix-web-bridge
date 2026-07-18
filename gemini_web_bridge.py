@@ -82,6 +82,7 @@ def check_gemini_ready():
     return False, "No Gemini tab"
 
 async def ask_gemini_web(prompt_text, image_path=None):
+    global _known_ids
     ws_url = get_gemini_ws()
     if not ws_url:
         hint = BROWSER["display"] if BROWSER else "Chrome/Edge"
@@ -101,49 +102,46 @@ async def ask_gemini_web(prompt_text, image_path=None):
             async def exec_js(cid, js):
                 return await send_cdp(cid, "Runtime.evaluate", {"expression": js, "returnByValue": True})
 
-            # ── 注入 MutationObserver（Gemini 改进版：处理 addedNodes）──
+            # ── 注入 MutationObserver（简化版：每次 DOM 变化扫全部消息）──
             await exec_js(200, (
                 "(function(){"
                 " if(window.__GEMINI_OBSERVER) return 'already';"
                 " window.__GEMINI_LAST_RESP='';"
-                " var extract=function(node){"
-                "  if(!node||node.nodeType!==1) return null;"
-                "  var el=node.matches('message-content')?node:node.querySelector('message-content');"
-                "  if(!el) return null;"
-                "  var t=(el.innerText||el.textContent||'').trim();"
-                "  return t.length>20?t:null;"
-                " };"
-                " var observer=new MutationObserver(function(mutations){"
-                "  for(var mi=0;mi<mutations.length;mi++){"
-                "   var m=mutations[mi];"
-                "   for(var j=0;j<m.addedNodes.length;j++){"
-                "    var nt=extract(m.addedNodes[j]);"
-                "    if(nt) window.__GEMINI_LAST_RESP=nt;"
-                "   }"
-                "   if(m.target&&m.target.querySelectorAll){"
-                "    var mcs=m.target.querySelectorAll('message-content');"
-                "    for(var k=0;k<mcs.length;k++){"
-                "     var t=(mcs[k].innerText||'').trim();"
-                "     if(t.length>20) window.__GEMINI_LAST_RESP=t;"
-                "    }"
-                "   }"
+                " var scan=function(){"
+                "  var all=document.querySelectorAll('message-content');"
+                "  for(var i=all.length-1;i>=0;i--){"
+                "   var t=(all[i].innerText||all[i].textContent||'').trim();"
+                "   if(t.length>10){window.__GEMINI_LAST_RESP=t;return;}"
                 "  }"
-                " });"
+                " };"
+                " var observer=new MutationObserver(scan);"
                 " observer.observe(document.body,{childList:true,subtree:true,characterData:true});"
                 " window.__GEMINI_OBSERVER=observer;"
+                " scan();"  # 立即执行一次
                 " return 'ok';"
                 "})();"
             ))
             log("MutationObserver installed")
 
-            # ── 每次发送前：清空缓存 + 记录最后一条消息 ID（去重用）──
-            await exec_js(201, (
-                "window.__GEMINI_LAST_RESP='';"
-                "(function(){var a=document.querySelectorAll('message-content');"
-                " window.__GEMINI_LAST_ID=a.length?a[a.length-1].id:'none';"
+            # ── 每次发送前：清空缓存 + 记录所有已知消息摘要 ──
+            await exec_js(201, "window.__GEMINI_LAST_RESP='';'ok';")
+            # 获取 count + 所有消息文本摘要
+            snap_res = await exec_js(202, (
+                "(function(){"
+                " var a=document.querySelectorAll('message-content');"
+                " var texts=[];"
+                " for(var i=0;i<a.length;i++){texts.push((a[i].innerText||'').trim().substring(0,80));}"
+                " return JSON.stringify({count:a.length,texts:texts});"
                 "})();"
-                "'ok';"
             ))
+            base_count = 0; known_texts = set()
+            try:
+                snap = json.loads(snap_res.get("result",{}).get("result",{}).get("value","{}"))
+                base_count = snap.get("count", 0)
+                known_texts = set(snap.get("texts", []))
+            except:
+                pass
+            log(f"Base: count={base_count}, known_texts={len(known_texts)}")
 
             # ── 多模态：通过 DataTransfer + paste 事件模拟 Ctrl+V 粘贴 ──
             if image_path and os.path.isfile(image_path):
@@ -222,25 +220,26 @@ async def ask_gemini_web(prompt_text, image_path=None):
             await exec_js(104, js_click)
             log("Injected, waiting for reply...")
 
-            # 回复检测：Observer 缓存 → 兜底扫描（跳过 sent_count 之前的旧消息）
+            # 回复检测：Observer 缓存 → 兜底扫描（跳过 known_texts）
+            import json as _json
+            known_json = _json.dumps(list(known_texts))
             js_get = (
                 "(function(){"
                 " var c=window.__GEMINI_LAST_RESP;"
-                " if(c&&c.length>10) return c;"
-                " var all=document.querySelectorAll('message-content');"
-                " if(all.length===0){"
-                "  var busy=document.querySelector('[aria-busy=\"true\"], mat-progress-bar');"
-                "  return busy?'PROCESSING':'WAIT';"
+                " if(c&&c.length>10){"
+                "  var cp=(c||'').trim().substring(0,80);"
+                "  var kt=new Set(" + known_json + ");"
+                "  if(!kt.has(cp)) return c;"
                 " }"
-                # 只取 ID 不同于上次最后一条的新消息
-                " var lastId=window.__GEMINI_LAST_ID||'';"
-                " var found=null;"
+                " var all=document.querySelectorAll('message-content');"
+                " if(all.length===0) return 'WAIT';"
+                " if(all.length<=" + str(base_count + 1) + ") return 'WAIT';"
+                " var kt2=new Set(" + known_json + ");"
                 " for(var i=all.length-1;i>=0;i--){"
                 "  var t=(all[i].innerText||all[i].textContent||'').trim();"
-                "  if(all[i].id===lastId) break;"  # 遇到旧消息就停
-                "  if(t.length>10) found=t;"
+                "  if(t.length>10&&!kt2.has(t.substring(0,80))) return t;"
                 " }"
-                " return found||'WAIT';"
+                " return 'WAIT';"
                 "})();"
             )
             sl=0; st=0; ft=""; stale=0; await asyncio.sleep(3.0)
@@ -299,6 +298,8 @@ def setup_browser():
     return "\n".join(lines)
 
 SN="gemini-web-bridge"; SV="2.2.0"
+# 跨调用已知消息 ID 集合（Python 端维护，防止竞态）
+_known_ids = set()
 TOOLS=[{"name":"ask_gemini_web","description":"Send prompt (and optionally an image) to Gemini in Chrome/Edge. Set image_path to a local image file for vision analysis. Returns full reply.","inputSchema":{"type":"object","properties":{"prompt":{"type":"string","description":"The prompt to send"},"image_path":{"type":"string","description":"Optional: absolute path to an image file for Gemini vision analysis"}},"required":["prompt"]}},{"name":"setup_gemini_browser","description":"Auto-detect and launch Chrome/Edge with debug port.","inputSchema":{"type":"object","properties":{},"required":[]}},{"name":"check_gemini_status","description":"Check browser+Gemini status.","inputSchema":{"type":"object","properties":{},"required":[]}}]
 def mr(i,r): return json.dumps({"jsonrpc":"2.0","id":i,"result":r},ensure_ascii=False)
 def me(i,c,m): return json.dumps({"jsonrpc":"2.0","id":i,"error":{"code":c,"message":m}},ensure_ascii=False)

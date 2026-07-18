@@ -136,10 +136,12 @@ async def ask_gemini_web(prompt_text, image_path=None):
             ))
             log("MutationObserver installed")
 
-            # ── 每次发送前：清空缓存 + 记录基准 count（去重用）──
+            # ── 每次发送前：清空缓存 + 记录最后一条消息 ID（去重用）──
             await exec_js(201, (
                 "window.__GEMINI_LAST_RESP='';"
-                "window.__GEMINI_SENT_COUNT=document.querySelectorAll('message-content').length;"
+                "(function(){var a=document.querySelectorAll('message-content');"
+                " window.__GEMINI_LAST_ID=a.length?a[a.length-1].id:'none';"
+                "})();"
                 "'ok';"
             ))
 
@@ -230,14 +232,15 @@ async def ask_gemini_web(prompt_text, image_path=None):
                 "  var busy=document.querySelector('[aria-busy=\"true\"], mat-progress-bar');"
                 "  return busy?'PROCESSING':'WAIT';"
                 " }"
-                # 只扫描新消息（至少 +2: 跳过用户消息，等模型回复）
-                " var sent=window.__GEMINI_SENT_COUNT||0;"
-                " if(all.length<=sent+1) return 'WAIT';"
+                # 只取 ID 不同于上次最后一条的新消息
+                " var lastId=window.__GEMINI_LAST_ID||'';"
+                " var found=null;"
                 " for(var i=all.length-1;i>=0;i--){"
                 "  var t=(all[i].innerText||all[i].textContent||'').trim();"
-                "  if(t.length>10) return t;"
+                "  if(all[i].id===lastId) break;"  # 遇到旧消息就停
+                "  if(t.length>10) found=t;"
                 " }"
-                " return 'WAIT';"
+                " return found||'WAIT';"
                 "})();"
             )
             sl=0; st=0; ft=""; stale=0; await asyncio.sleep(3.0)
